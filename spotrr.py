@@ -1693,33 +1693,42 @@ class SpotRRApp:
         except Exception as exc:
             self._log(f"❌  Shortcut error: {exc}", "error")
 
+    @staticmethod
+    def _windows_desktop() -> str:
+        """Return the real Desktop path — handles OneDrive and locale redirects."""
+        try:
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "[Environment]::GetFolderPath('Desktop')"],
+                capture_output=True, text=True, timeout=5, **_win_flags())
+            path = r.stdout.strip()
+            if path and os.path.isdir(path):
+                return path
+        except Exception:
+            pass
+        return os.path.join(os.path.expanduser("~"), "Desktop")
+
     def _create_shortcut_windows(self, base: str, icon: str, script: str) -> None:
-        vbs_launcher = os.path.join(base, "launch.vbs")
-        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+        pythonw = os.path.join(base, ".venv", "Scripts", "pythonw.exe")
+        if not os.path.exists(pythonw):
+            pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        if not os.path.exists(pythonw):
+            pythonw = sys.executable
+
+        desktop = self._windows_desktop()
         target  = os.path.join(desktop, "SpotRR.lnk")
 
-        if os.path.exists(vbs_launcher):
-            ps = (
-                f'$q=[char]34;'
-                f'$s=(New-Object -COM WScript.Shell).CreateShortcut("{target}");'
-                f'$s.TargetPath="wscript.exe";'
-                f'$s.Arguments=$q+"{vbs_launcher}"+$q;'
-                f'$s.WorkingDirectory="{base}";'
-                f'$s.IconLocation="{icon}";'
-                f'$s.Description="SpotRR";'
-                f'$s.WindowStyle=1;'
-                f'$s.Save()'
-            )
-        else:
-            ps = (
-                f'$s=(New-Object -COM WScript.Shell).CreateShortcut("{target}");'
-                f'$s.TargetPath="{script}";'
-                f'$s.WorkingDirectory="{base}";'
-                f'$s.IconLocation="{icon}";'
-                f'$s.Description="SpotRR";'
-                f'$s.WindowStyle=1;'
-                f'$s.Save()'
-            )
+        ps = (
+            f'$q=[char]34;'
+            f'$s=(New-Object -COM WScript.Shell).CreateShortcut("{target}");'
+            f'$s.TargetPath="{pythonw}";'
+            f'$s.Arguments=$q+"{script}"+$q;'
+            f'$s.WorkingDirectory="{base}";'
+            f'$s.IconLocation="{icon}";'
+            f'$s.Description="SpotRR";'
+            f'$s.WindowStyle=1;'
+            f'$s.Save()'
+        )
         result = subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
             capture_output=True, text=True, **_win_flags())
