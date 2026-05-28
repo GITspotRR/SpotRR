@@ -40,6 +40,46 @@ That's it. No manual pip, no manual FFmpeg setup.
 
 ---
 
+### Manual installation (Windows — no scripts)
+
+If you prefer not to run `.bat` files, you can set everything up yourself:
+
+**1. Create a virtual environment**
+
+```bat
+cd path\to\SpotRR
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+**2. Install Python dependencies**
+
+```bat
+pip install -r requirements.txt
+```
+
+**3. Install FFmpeg**
+
+Option A — via spotdl (easiest):
+```bat
+spotdl --download-ffmpeg
+```
+
+Option B — manually:
+1. Download FFmpeg from [ffmpeg.org/download.html](https://ffmpeg.org/download.html) (Windows build)
+2. Extract the ZIP and copy `ffmpeg.exe` into the `SpotRR` folder  
+   — or add it to your system PATH so it's available globally
+
+**4. Run the app**
+
+```bat
+.venv\Scripts\pythonw.exe spotrr.py
+```
+
+> `pythonw.exe` hides the console window. Use `python.exe` instead if you want to see logs.
+
+---
+
 ### Linux / macOS
 
 ```bash
