@@ -4,7 +4,7 @@ title SpotRR — Setup
 color 0A
 cls
 
-:: ── Always run from the directory that contains this script ──────────────────
+:: Always run from the folder that contains this script
 set "DIR=%~dp0"
 cd /d "%DIR%"
 
@@ -20,7 +20,7 @@ if errorlevel 1 (
     echo  [ERROR] Python not found.
     echo.
     echo  Install Python 3.10+ from:  https://www.python.org/downloads/
-    echo  IMPORTANT: check "Add Python to PATH" during install.
+    echo  Check "Add Python to PATH" during install.
     echo.
     pause & exit /b 1
 )
@@ -37,10 +37,12 @@ if not exist ".venv\Scripts\python.exe" (
     echo  [OK] Virtual environment ready
 )
 
-:: ── Dependencies — skip if requirements.txt has not changed ──────────────────
+:: ── Dependencies — skip if requirements.txt unchanged (certutil = no PowerShell) ──
 set "HASH_FILE=.venv\.req_hash"
 set "NEED_INSTALL=1"
-for /f "usebackq delims=" %%H in (`powershell -NoProfile -Command "(Get-FileHash 'requirements.txt' -Algorithm MD5).Hash" 2^>nul`) do set "REQ_HASH=%%H"
+for /f "skip=1 tokens=*" %%H in ('certutil -hashfile "requirements.txt" MD5 2^>nul') do (
+    if not defined REQ_HASH set "REQ_HASH=%%H"
+)
 if defined REQ_HASH (
     if exist "%HASH_FILE%" (
         set /p STORED_HASH=<"%HASH_FILE%"
@@ -50,7 +52,7 @@ if defined REQ_HASH (
 if "!NEED_INSTALL!"=="1" (
     echo  [..] Installing packages ^(first run takes a few minutes^)...
     .venv\Scripts\pip install -r requirements.txt --quiet --prefer-binary --disable-pip-version-check
-    if errorlevel 1 ( echo  [ERROR] Package install failed. Check your internet connection. & pause & exit /b 1 )
+    if errorlevel 1 ( echo  [ERROR] Install failed. Check internet connection. & pause & exit /b 1 )
     if defined REQ_HASH echo !REQ_HASH!>"%HASH_FILE%"
     echo  [OK] Packages installed
 ) else (
@@ -60,35 +62,49 @@ if "!NEED_INSTALL!"=="1" (
 :: ── FFmpeg ────────────────────────────────────────────────────────────────────
 set "FFMPEG=%USERPROFILE%\.config\spotdl\ffmpeg.exe"
 if not exist "%FFMPEG%" (
-    echo  [..] Downloading FFmpeg ^(one-time, may take a moment^)...
-    .venv\Scripts\python -m spotdl --download-ffmpeg >nul 2>&1
+    echo  [..] Downloading FFmpeg ^(one-time, please wait^)...
+    .venv\Scripts\python -m spotdl --download-ffmpeg
     if exist "%FFMPEG%" ( echo  [OK] FFmpeg ready ) else ( echo  [WARN] FFmpeg download may have failed — app will retry on launch )
 ) else (
     echo  [OK] FFmpeg ready
 )
 
-:: ── Desktop shortcut — target pythonw.exe directly (no extra launcher) ───────
+:: ── Desktop path — handles OneDrive Desktop without PowerShell ───────────────
+set "DESKTOP=%USERPROFILE%\Desktop"
+if not exist "!DESKTOP!\" (
+    for /d %%D in ("%USERPROFILE%\OneDrive*") do (
+        if exist "%%D\Desktop\" set "DESKTOP=%%D\Desktop"
+    )
+)
+
+:: ── Desktop shortcut — cscript (native, ~80ms) instead of PowerShell (3-4s) ──
 set "PYTHONW=%DIR%.venv\Scripts\pythonw.exe"
 set "SCRIPT=%DIR%spotrr.py"
 set "ICON=%DIR%assets\icon.ico"
-
-:: Get the real Desktop path (works even when Desktop is inside OneDrive)
-for /f "usebackq delims=" %%D in (`powershell -NoProfile -Command "[Environment]::GetFolderPath('Desktop')"`) do set "DESKTOP=%%D"
-if not defined DESKTOP set "DESKTOP=%USERPROFILE%\Desktop"
 set "LNK=%DESKTOP%\SpotRR.lnk"
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$q=[char]34;$s=(New-Object -COM WScript.Shell).CreateShortcut('%LNK%');$s.TargetPath='%PYTHONW%';$s.Arguments=$q+'%SCRIPT%'+$q;$s.WorkingDirectory='%DIR%';$s.IconLocation='%ICON%';$s.Description='SpotRR';$s.WindowStyle=1;$s.Save()" 2>nul
-
 if exist "%LNK%" (
-    echo  [OK] Desktop shortcut created
+    echo  [OK] Desktop shortcut ready
 ) else (
-    echo  [WARN] Could not create shortcut — create it manually from the app toolbar
+    set "SC_VBS=%TEMP%\spotrr_sc.vbs"
+    echo Set sh = CreateObject("WScript.Shell")                        > "!SC_VBS!"
+    echo Set lnk = sh.CreateShortcut("!LNK!")                        >> "!SC_VBS!"
+    echo lnk.TargetPath = "!PYTHONW!"                                >> "!SC_VBS!"
+    echo lnk.Arguments = Chr(34) ^& "!SCRIPT!" ^& Chr(34)           >> "!SC_VBS!"
+    echo lnk.WorkingDirectory = "!DIR!"                              >> "!SC_VBS!"
+    echo lnk.IconLocation = "!ICON!"                                 >> "!SC_VBS!"
+    echo lnk.Description = "SpotRR"                                  >> "!SC_VBS!"
+    echo lnk.WindowStyle = 1                                         >> "!SC_VBS!"
+    echo lnk.Save                                                    >> "!SC_VBS!"
+    cscript //NoLogo "!SC_VBS!" >nul 2>&1
+    del "!SC_VBS!" >nul 2>&1
+    if exist "%LNK%" ( echo  [OK] Desktop shortcut created ) else ( echo  [WARN] Could not create shortcut )
 )
 
 :: ── Launch ────────────────────────────────────────────────────────────────────
 echo.
 echo  =====================================================
-echo    Ready!  Launching SpotRR...
+echo    All done!  Launching SpotRR...
 echo  =====================================================
 echo.
 start "" "%PYTHONW%" "%SCRIPT%"
