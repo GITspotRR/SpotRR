@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.spec
+
+# Application runtime files
+app.log
+logs/
+downloads/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Secrets — NEVER commit credentials
+.env
+secrets.json
+
+# Large binaries
+assets/ffmpeg.exe
+
+# Spotify auth token cache
+.cache

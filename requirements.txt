@@ -1,0 +1,9 @@
+requests>=2.31.0
+Pillow>=10.0.0
+spotdl>=4.2.0
+spotipy>=2.23.0
+mutagen>=1.47.0
+tqdm>=4.66.0
+tkinterdnd2>=0.3.0
+rapidfuzz>=3.0.0
+qrcode[pil]>=7.4.0
