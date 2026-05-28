@@ -452,12 +452,13 @@ class SpotRRApp:
 
     def _ensure_ffmpeg(self) -> None:
         """Auto-download FFmpeg via spotdl if it is not already available."""
-        # spotdl stores its own ffmpeg here when --download-ffmpeg is used
-        spotdl_ffmpeg = os.path.join(
-            os.path.expanduser("~"), ".config", "spotdl",
-            "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")
-
-        if shutil.which("ffmpeg") or os.path.exists(spotdl_ffmpeg):
+        suffix = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+        home   = os.path.expanduser("~")
+        spotdl_paths = [
+            os.path.join(home, ".spotdl",        suffix),   # spotdl 4.x
+            os.path.join(home, ".config", "spotdl", suffix), # spotdl 3.x
+        ]
+        if shutil.which("ffmpeg") or any(os.path.exists(p) for p in spotdl_paths):
             self._log("✅  FFmpeg ready", "success")
             return
 
