@@ -19,7 +19,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import warnings
@@ -192,19 +191,6 @@ def _popen(cmd: list, **kwargs) -> subprocess.Popen:
     return subprocess.Popen(cmd, **{**_win_flags(), **kwargs})
 
 
-# ── Lock-file helpers ─────────────────────────────────────────────────────────
-
-_LOCK_FILE = os.path.join(tempfile.gettempdir(), "spotrr.lock")
-
-
-def _remove_lock() -> None:
-    try:
-        if os.path.exists(_LOCK_FILE):
-            os.remove(_LOCK_FILE)
-    except OSError:
-        pass
-
-
 # ── UI primitives ─────────────────────────────────────────────────────────────
 
 def _divider(parent, bg: str | None = None, orient: str = "h") -> tk.Frame:
@@ -279,7 +265,6 @@ class SpotRRApp:
             self._write_cfg(cfg)
 
     def _on_close(self) -> None:
-        _remove_lock()
         self.root.destroy()
 
     # ── Paths & config ────────────────────────────────────────────────────────
@@ -782,7 +767,7 @@ class SpotRRApp:
 
             btn_bg   = C["bg4"]
             btn_fg   = brand
-            lbl_text = f"{symbol} {meta.get('name', coin)}"
+            lbl_text = f"{symbol} {coin}"
             cmd      = (lambda: self._show_eth_picker()) if coin == "ETH" else (lambda c=coin: self._show_crypto(c))
 
             b = tk.Button(btns_frame, text=lbl_text, command=cmd,
@@ -1668,27 +1653,38 @@ class SpotRRApp:
             self._log(f"❌  Shortcut error: {exc}", "error")
 
     def _create_shortcut_windows(self, base: str, icon: str, script: str) -> None:
-        run_bat = os.path.join(base, "run.bat")
+        vbs_launcher = os.path.join(base, "launch.vbs")
         desktop = os.path.join(os.path.expanduser("~"), "Desktop")
         target  = os.path.join(desktop, "SpotRR.lnk")
 
-        launcher = run_bat if os.path.exists(run_bat) else script
-
-        ps = (
-            f'$s=(New-Object -COM WScript.Shell).CreateShortcut("{target}");'
-            f'$s.TargetPath="{launcher}";'
-            f'$s.WorkingDirectory="{base}";'
-            f'$s.IconLocation="{icon}";'
-            f'$s.Description="SpotRR";'
-            f'$s.WindowStyle=1;'
-            f'$s.Save()'
-        )
+        if os.path.exists(vbs_launcher):
+            ps = (
+                f'$q=[char]34;'
+                f'$s=(New-Object -COM WScript.Shell).CreateShortcut("{target}");'
+                f'$s.TargetPath="wscript.exe";'
+                f'$s.Arguments=$q+"{vbs_launcher}"+$q;'
+                f'$s.WorkingDirectory="{base}";'
+                f'$s.IconLocation="{icon}";'
+                f'$s.Description="SpotRR";'
+                f'$s.WindowStyle=1;'
+                f'$s.Save()'
+            )
+        else:
+            ps = (
+                f'$s=(New-Object -COM WScript.Shell).CreateShortcut("{target}");'
+                f'$s.TargetPath="{script}";'
+                f'$s.WorkingDirectory="{base}";'
+                f'$s.IconLocation="{icon}";'
+                f'$s.Description="SpotRR";'
+                f'$s.WindowStyle=1;'
+                f'$s.Save()'
+            )
         result = subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
             capture_output=True, text=True, **_win_flags())
 
         if os.path.exists(target):
-            self._log(f"✅  Shortcut created on Desktop", "success")
+            self._log("✅  Shortcut created on Desktop", "success")
         else:
             self._log(f"⚠️  Could not create shortcut: {result.stderr.strip()}", "warning")
 
@@ -1921,10 +1917,11 @@ class SpotRRApp:
             lbl_desc.pack(fill="x")
 
             def _bind_row(r, i, lt, ld, c):
-                for w in (r, i, lt, ld):
+                all_w = (r, i, lt, ld)
+                for w in all_w:
                     w.bind("<Button-1>", lambda e, x=c: _pick(x))
-                    w.bind("<Enter>", lambda e, x=r: x.configure(bg=C["bg4"]))
-                    w.bind("<Leave>", lambda e, x=r: x.configure(bg=C["bg3"]))
+                    w.bind("<Enter>", lambda e, ws=all_w: [x.configure(bg=C["bg4"]) for x in ws])
+                    w.bind("<Leave>", lambda e, ws=all_w: [x.configure(bg=C["bg3"]) for x in ws])
 
             _bind_row(row, inner, lbl_title, lbl_desc, coin)
 

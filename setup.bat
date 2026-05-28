@@ -1,11 +1,11 @@
 @echo off
-title SpotRR — Easy Setup
+title SpotRR — Setup
 color 0A
 cls
 
 echo.
 echo  =====================================================
-echo    SPOTRR  ^|  Easy Setup
+echo    SPOTRR  ^|  Setup ^& Launch
 echo  =====================================================
 echo.
 
@@ -39,8 +39,8 @@ if not exist ".venv" (
     echo  [OK] Virtual environment already exists
 )
 
-:: ── Install dependencies ──────────────────────────────────────────────────────
-echo  [..] Installing dependencies (first time may take a few minutes)...
+:: ── Install / update dependencies ─────────────────────────────────────────────
+echo  [..] Checking dependencies...
 .venv\Scripts\pip install -r requirements.txt --quiet --disable-pip-version-check
 if %errorlevel% neq 0 (
     echo  [ERROR] Failed to install dependencies.
@@ -48,7 +48,7 @@ if %errorlevel% neq 0 (
     pause
     exit /b 1
 )
-echo  [OK] All dependencies installed
+echo  [OK] Dependencies ready
 
 :: ── Download FFmpeg ───────────────────────────────────────────────────────────
 set "FFMPEG_PATH=%USERPROFILE%\.config\spotdl\ffmpeg.exe"
@@ -64,35 +64,28 @@ if not exist "%FFMPEG_PATH%" (
     echo  [OK] FFmpeg already installed
 )
 
-:: ── Create desktop shortcut ───────────────────────────────────────────────────
+:: ── Create desktop shortcut (points to launch.vbs — no CMD window) ───────────
 echo  [..] Creating desktop shortcut...
 
 set "SCRIPT_DIR=%~dp0"
-set "RUN_BAT=%SCRIPT_DIR%run.bat"
+set "VBS_PATH=%SCRIPT_DIR%launch.vbs"
 set "ICON_PATH=%SCRIPT_DIR%assets\icon.ico"
 set "SHORTCUT=%USERPROFILE%\Desktop\SpotRR.lnk"
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$s = (New-Object -COM WScript.Shell).CreateShortcut('%SHORTCUT%');" ^
-  "$s.TargetPath = '%RUN_BAT%';" ^
-  "$s.WorkingDirectory = '%SCRIPT_DIR%';" ^
-  "$s.IconLocation = '%ICON_PATH%';" ^
-  "$s.Description = 'SpotRR';" ^
-  "$s.WindowStyle = 1;" ^
-  "$s.Save()"
+  "$q=[char]34;$s=(New-Object -COM WScript.Shell).CreateShortcut('%SHORTCUT%');$s.TargetPath='wscript.exe';$s.Arguments=$q+'%VBS_PATH%'+$q;$s.WorkingDirectory='%SCRIPT_DIR%';$s.IconLocation='%ICON_PATH%';$s.Description='SpotRR';$s.WindowStyle=1;$s.Save()" >nul 2>&1
 
 if exist "%SHORTCUT%" (
     echo  [OK] Shortcut created on Desktop
 ) else (
     echo  [WARN] Could not create shortcut automatically.
-    echo         You can create it manually from the app (toolbar ^> Shortcut).
 )
 
-:: ── Done ──────────────────────────────────────────────────────────────────────
+:: ── Launch app (no CMD window stays open) ─────────────────────────────────────
 echo.
 echo  =====================================================
 echo    Setup complete!  Launching SpotRR...
 echo  =====================================================
 echo.
-timeout /t 2 /nobreak >nul
-start "" "%RUN_BAT%"
+start "" wscript.exe "%VBS_PATH%"
+exit

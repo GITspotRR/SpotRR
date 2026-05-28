@@ -56,14 +56,14 @@ bash setup.sh
 
 ---
 
-### Auto-launch (any OS after setup)
+### Re-run setup / launch (any OS)
 
 ```bash
-# Windows
-run.bat
+# Windows — also launches the app after setup
+setup.bat
 
 # Linux / macOS
-bash run.sh
+bash setup.sh
 ```
 
 ---
@@ -163,9 +163,9 @@ SpotRR/
 ├── spotrr.py               # Main application (single file)
 ├── requirements.txt        # Python dependencies
 ├── settings.json           # User config (add your credentials here)
-├── setup.bat               # Windows one-click setup
-├── setup.sh                # Linux / macOS setup
-├── run.bat                 # Windows launcher
+├── setup.bat               # Windows setup + launcher (one-click)
+├── launch.vbs              # Silent launcher (no CMD window)
+├── setup.sh                # Linux / macOS setup + launcher
 ├── run.sh                  # Linux / macOS launcher
 ├── assets/
 │   ├── icon.ico            # App icon
@@ -196,7 +196,7 @@ SpotRR/
 
 **HTTP 429 errors** → Rate limit. Reduce threads to 2 or 4 and try again. The app retries automatically 3 times.
 
-**App doesn't open on Windows** → Right-click `run.bat` → *Run as administrator*.
+**App doesn't open on Windows** → Right-click `setup.bat` → *Run as administrator*.
 
 ---
 
