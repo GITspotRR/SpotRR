@@ -40,6 +40,34 @@ That's it. No manual pip, no manual FFmpeg setup.
 
 ---
 
+### Linux / macOS
+
+```bash
+# 1. Clone
+git clone https://github.com/RRSpot/SpotRR.git
+cd SpotRR
+
+# 2. Setup (installs everything + creates shortcut)
+bash setup.sh
+```
+
+> **Linux prerequisite:** `sudo apt install python3 python3-venv` (Debian/Ubuntu)  
+> **macOS prerequisite:** `brew install python`
+
+---
+
+### Auto-launch (any OS after setup)
+
+```bash
+# Windows
+run.bat
+
+# Linux / macOS
+bash run.sh
+```
+
+---
+
 ### Manual installation (Windows — no scripts)
 
 If you prefer not to run `.bat` files, you can set everything up yourself:
@@ -77,34 +105,6 @@ Option B — manually:
 ```
 
 > `pythonw.exe` hides the console window. Use `python.exe` instead if you want to see logs.
-
----
-
-### Linux / macOS
-
-```bash
-# 1. Clone
-git clone https://github.com/RRSpot/SpotRR.git
-cd SpotRR
-
-# 2. Setup (installs everything + creates shortcut)
-bash setup.sh
-```
-
-> **Linux prerequisite:** `sudo apt install python3 python3-venv` (Debian/Ubuntu)  
-> **macOS prerequisite:** `brew install python`
-
----
-
-### Auto-launch (any OS after setup)
-
-```bash
-# Windows
-run.bat
-
-# Linux / macOS
-bash run.sh
-```
 
 ---
 
