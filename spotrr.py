@@ -1,5 +1,5 @@
 """
-SpotRR  v2.0.0
+SpotRR  v2.1.0
 Desktop application to get music using spotdl.
 
 Usage:
@@ -17,11 +17,13 @@ import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
 import time
 import warnings
+import webbrowser
 from datetime import datetime
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="pkg_resources")
@@ -73,7 +75,8 @@ except (ImportError, RuntimeError, AttributeError):
 
 # ── App metadata ──────────────────────────────────────────────────────────────
 APP_NAME    = "SpotRR"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
+APP_GITHUB  = "https://github.com/GITspotRR/SpotRR"
 
 CRYPTO_ADDRESSES: dict = {
     "BTC":   "bc1q6lz2yhwqcttjm8m7tr8jtd4sdnj3l7vgv36m0l",
@@ -191,6 +194,35 @@ def _popen(cmd: list, **kwargs) -> subprocess.Popen:
     return subprocess.Popen(cmd, **{**_win_flags(), **kwargs})
 
 
+# ── Single-instance protection ────────────────────────────────────────────────
+
+_INSTANCE_SOCK: "socket.socket | None" = None
+_INSTANCE_PORT = 19847
+
+
+def _acquire_instance() -> bool:
+    global _INSTANCE_SOCK
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+        sock.bind(("127.0.0.1", _INSTANCE_PORT))
+        sock.listen(1)
+        _INSTANCE_SOCK = sock
+        return True
+    except OSError:
+        return False
+
+
+def _release_instance() -> None:
+    global _INSTANCE_SOCK
+    if _INSTANCE_SOCK:
+        try:
+            _INSTANCE_SOCK.close()
+        except Exception:
+            pass
+        _INSTANCE_SOCK = None
+
+
 # ── UI primitives ─────────────────────────────────────────────────────────────
 
 def _divider(parent, bg: str | None = None, orient: str = "h") -> tk.Frame:
@@ -247,6 +279,7 @@ class SpotRRApp:
         self._build_ui()
         self._load_settings()
         self._setup_drag_drop()
+        self._bind_shortcuts()
 
         self.root.after(200, self._deferred_init)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -257,6 +290,7 @@ class SpotRRApp:
         self._check_and_install_deps()
         self._init_spotify_client()
         self._load_logo()
+        self._restore_geometry()
         # Auto-create shortcut on first ever launch
         cfg = self._read_cfg()
         if not cfg.get("shortcut_created"):
@@ -265,6 +299,8 @@ class SpotRRApp:
             self._write_cfg(cfg)
 
     def _on_close(self) -> None:
+        self._save_geometry()
+        _release_instance()
         self.root.destroy()
 
     # ── Paths & config ────────────────────────────────────────────────────────
@@ -716,7 +752,7 @@ class SpotRRApp:
         _tb("📌", "Shortcut",          self._create_shortcut)
         _tb("❓", "How to Setup",      self._show_how_to_setup)
         _tb("🔄", "Update spotdl",     self._check_spotdl_updates)
-        _tb("📋", "Legal Info",        self._show_legal)
+        _tb("ℹ️", "About",             self._show_about)
 
     def _build_donation(self, parent: tk.Frame) -> None:
         """Prominent donation / support card at the bottom of the left panel."""
@@ -1376,12 +1412,15 @@ class SpotRRApp:
             self._log(f"✅  Complete: {label}", "success")
             self._set_status("Complete", C["green"])
             self._set_progress(100)
+            self._notify("SpotRR — Download complete", label[:60])
             return
 
         denominator = ok + fail
         if fail == 0:
             self._log(f"✅  {ok}/{denominator} tracks downloaded — {label}", "success")
             self._set_status(f"Complete  ·  {ok} track{'s' if ok != 1 else ''}", C["green"])
+            self._notify("SpotRR — Download complete",
+                         f"{ok} track{'s' if ok != 1 else ''} downloaded")
         else:
             self._log(
                 f"⚠️  {ok}/{denominator} tracks downloaded · {fail} failed\n"
@@ -1391,6 +1430,8 @@ class SpotRRApp:
             self._set_status(
                 f"{ok}/{denominator} downloaded  ·  {fail} failed",
                 C["orange"])
+            self._notify("SpotRR — Download finished",
+                         f"{ok}/{denominator} tracks  ·  {fail} failed")
         self._set_progress(100)
 
     def _build_cmd(self, url: str, folder: str, fmt: str, quality: str,
@@ -1781,13 +1822,13 @@ class SpotRRApp:
         # ── Step 1 ────────────────────────────────────────────────────────────
         _section("Step 1 — Create a Developer App")
         _line("1.  Open your browser and go to:")
-        # Clickable URL label
         url_lbl = tk.Label(content,
                            text="   🔗  developer.spotify.com/dashboard",
                            bg=C["bg2"], fg=C["blue"],
                            font=font.Font(family="Segoe UI", size=9, weight="bold"),
                            anchor="w", cursor="hand2")
         url_lbl.pack(fill="x")
+        url_lbl.bind("<Button-1>", lambda e: webbrowser.open("https://developer.spotify.com/dashboard"))
 
         _line("2.  Log in with your account.")
         _line('3.  Click  "Create app".')
@@ -1849,27 +1890,100 @@ class SpotRRApp:
         ww, wh = win.winfo_width(), win.winfo_height()
         win.geometry(f"+{px + (pw - ww)//2}+{py + (ph - wh)//2}")
 
-    # ── Legal ─────────────────────────────────────────────────────────────────
+    # ── About ─────────────────────────────────────────────────────────────────
 
-    def _show_legal(self) -> None:
+    def _show_about(self) -> None:
         win = tk.Toplevel(self.root)
-        win.title("Legal Information")
+        win.title(f"About {APP_NAME}")
         win.configure(bg=C["bg2"])
+        win.resizable(False, False)
         win.transient(self.root)
         win.grab_set()
-        win.resizable(False, False)
+
+        tk.Frame(win, bg=C["green"], height=3).pack(fill="x")
+
+        # Header
+        hdr = tk.Frame(win, bg=C["bg3"])
+        hdr.pack(fill="x")
+        tk.Label(hdr, text=APP_NAME, bg=C["bg3"], fg=C["green"],
+                 font=font.Font(family="Segoe UI", size=22, weight="bold"),
+                 pady=14).pack()
+        tk.Label(hdr, text=f"v{APP_VERSION}  ·  Your music, your way",
+                 bg=C["bg3"], fg=C["t3"],
+                 font=font.Font(family="Segoe UI", size=9)).pack(pady=(0, 12))
+
+        content = tk.Frame(win, bg=C["bg2"])
+        content.pack(fill="both", expand=True, padx=24, pady=(14, 0))
+
+        def _row(label: str, value: str, clickable: bool = False, url: str = "") -> None:
+            r = tk.Frame(content, bg=C["bg2"])
+            r.pack(fill="x", pady=3)
+            tk.Label(r, text=label, bg=C["bg2"], fg=C["t3"],
+                     font=font.Font(family="Segoe UI", size=8),
+                     width=14, anchor="e").pack(side="left", padx=(0, 10))
+            color = C["blue"] if clickable else C["t1"]
+            lbl = tk.Label(r, text=value, bg=C["bg2"], fg=color,
+                           font=font.Font(family="Segoe UI", size=9,
+                                         weight="bold" if clickable else "normal"),
+                           cursor="hand2" if clickable else "", anchor="w")
+            lbl.pack(side="left")
+            if clickable and url:
+                lbl.bind("<Button-1>", lambda e: webbrowser.open(url))
+                lbl.bind("<Enter>", lambda e: lbl.configure(fg=C["t1"]))
+                lbl.bind("<Leave>", lambda e: lbl.configure(fg=C["blue"]))
+
+        _row("Version", f"{APP_VERSION}")
+        _row("Source", "github.com/GITspotRR/SpotRR", clickable=True, url=APP_GITHUB)
+        _row("License", "MIT — Free & open source")
+        _row("Powered by", "spotdl  ·  spotipy  ·  tkinter")
+
+        _divider(content, bg=C["div"]).pack(fill="x", pady=(12, 8))
+
+        # Keyboard shortcuts
+        tk.Label(content, text="KEYBOARD SHORTCUTS", bg=C["bg2"], fg=C["t3"],
+                 font=font.Font(family="Segoe UI", size=8, weight="bold"),
+                 anchor="w").pack(fill="x", pady=(0, 6))
+
+        shortcuts = [
+            ("Ctrl + L",       "Focus URL field"),
+            ("Ctrl + Enter",   "Add URL to queue"),
+            ("F5",             "Start download"),
+            ("Delete",         "Remove selected queue item"),
+            ("F9",             "Clear console"),
+        ]
+        for keys, desc in shortcuts:
+            r = tk.Frame(content, bg=C["bg2"])
+            r.pack(fill="x", pady=1)
+            kb = tk.Label(r, text=keys,
+                          bg=C["bg4"], fg=C["green"],
+                          font=font.Font(family="Consolas", size=8),
+                          padx=6, pady=1)
+            kb.pack(side="left")
+            tk.Label(r, text=desc, bg=C["bg2"], fg=C["t2"],
+                     font=font.Font(family="Segoe UI", size=8),
+                     padx=8).pack(side="left")
+
+        _divider(content, bg=C["div"]).pack(fill="x", pady=(12, 8))
+
+        # Legal (compact)
+        tk.Label(content, text="LEGAL", bg=C["bg2"], fg=C["t3"],
+                 font=font.Font(family="Segoe UI", size=8, weight="bold"),
+                 anchor="w").pack(fill="x", pady=(0, 4))
+        tk.Label(content, text=LEGAL_DISCLAIMER, bg=C["bg2"], fg=C["t3"],
+                 font=("Segoe UI", 8), justify="left").pack(fill="x")
+
+        tk.Button(win, text="Close", command=win.destroy,
+                  bg=C["green"], fg=C["t1"],
+                  font=font.Font(family="Segoe UI", size=10, weight="bold"),
+                  bd=0, relief="flat", cursor="hand2",
+                  padx=32, pady=8, highlightthickness=0,
+                  activebackground=C["green_hi"]).pack(pady=(16, 20))
+
         win.update_idletasks()
-        # Centre over parent
         px, py = self.root.winfo_x(), self.root.winfo_y()
         pw, ph = self.root.winfo_width(), self.root.winfo_height()
-        ww, wh = win.winfo_reqwidth(), win.winfo_reqheight()
+        ww, wh = win.winfo_width(), win.winfo_height()
         win.geometry(f"+{px + (pw - ww)//2}+{py + (ph - wh)//2}")
-
-        tk.Label(win, text=LEGAL_DISCLAIMER, bg=C["bg2"], fg=C["t2"],
-                 font=("Segoe UI", 9), justify="left", padx=24, pady=16).pack()
-        tk.Button(win, text="I Understand", command=win.destroy,
-                  bg=C["green"], fg=C["t1"], font=("Segoe UI", 10),
-                  relief="flat", cursor="hand2", padx=20, pady=7).pack(pady=(0, 16))
 
     # ── Crypto donations ──────────────────────────────────────────────────────
 
@@ -2069,6 +2183,85 @@ class SpotRRApp:
         self.root.clipboard_append(text)
         self._log("✅  Copied to clipboard", "success")
 
+    # ── Keyboard shortcuts ────────────────────────────────────────────────────
+
+    def _bind_shortcuts(self) -> None:
+        r = self.root
+        r.bind("<Control-l>", lambda e: (
+            self.entry_link.focus_set(), self.entry_link.select_range(0, "end")))
+        r.bind("<Control-Return>", lambda e: self._add_to_queue())
+        r.bind("<F5>", lambda e: self._start_download() if not self.is_downloading else None)
+        r.bind("<F9>", lambda e: self._clear_console())
+        # Delete on queue listbox (bound after _build_queue creates it)
+        self.root.after(100, lambda: self.queue_list.bind(
+            "<Delete>", lambda e: self._remove_from_queue()))
+
+    # ── Window geometry ───────────────────────────────────────────────────────
+
+    def _save_geometry(self) -> None:
+        try:
+            cfg = self._read_cfg()
+            state = self.root.state()
+            cfg["window_state"] = state
+            if state == "normal":
+                cfg["window_geometry"] = self.root.geometry()
+            self._write_cfg(cfg)
+        except Exception:
+            pass
+
+    def _restore_geometry(self) -> None:
+        cfg = self._read_cfg()
+        state = cfg.get("window_state")
+        geom  = cfg.get("window_geometry")
+        if state == "normal" and geom:
+            try:
+                self.root.state("normal")
+                self.root.geometry(geom)
+            except Exception:
+                pass
+
+    # ── System notifications ──────────────────────────────────────────────────
+
+    def _notify(self, title: str, body: str) -> None:
+        def _xml(s: str) -> str:
+            return (s.replace("&", "&amp;").replace("<", "&lt;")
+                     .replace(">", "&gt;").replace('"', "&quot;"))
+
+        def _send():
+            try:
+                if sys.platform == "win32":
+                    t, b = _xml(title), _xml(body)
+                    ps = (
+                        "[Windows.UI.Notifications.ToastNotificationManager,"
+                        "Windows.UI.Notifications,ContentType=WindowsRuntime]|Out-Null;"
+                        "[Windows.Data.Xml.Dom.XmlDocument,"
+                        "Windows.Data.Xml.Dom.XmlDocument,ContentType=WindowsRuntime]|Out-Null;"
+                        "$xml=[Windows.Data.Xml.Dom.XmlDocument]::new();"
+                        f"$xml.LoadXml('<toast><visual><binding template=\"ToastGeneric\">"
+                        f"<text>{t}</text><text>{b}</text>"
+                        "</binding></visual></toast>');"
+                        "$toast=[Windows.UI.Notifications.ToastNotification]::new($xml);"
+                        "[Windows.UI.Notifications.ToastNotificationManager]::"
+                        "CreateToastNotifier('SpotRR').Show($toast)"
+                    )
+                    subprocess.run(
+                        ["powershell", "-NoProfile", "-WindowStyle", "Hidden",
+                         "-Command", ps],
+                        capture_output=True, timeout=6, **_win_flags())
+                elif sys.platform == "darwin":
+                    subprocess.run(
+                        ["osascript", "-e",
+                         f'display notification "{body}" with title "{title}"'],
+                        capture_output=True, timeout=5)
+                else:
+                    subprocess.run(
+                        ["notify-send", "-a", "SpotRR", "-t", "4000", title, body],
+                        capture_output=True, timeout=5)
+            except Exception:
+                pass
+
+        threading.Thread(target=_send, daemon=True).start()
+
     # ── Run ───────────────────────────────────────────────────────────────────
 
     def run(self) -> None:
@@ -2095,6 +2288,17 @@ def _pkg_available(pkg: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    if not _acquire_instance():
+        # Another instance is already running — surface it instead of opening twice
+        _tmp = tk.Tk()
+        _tmp.withdraw()
+        messagebox.showinfo(
+            APP_NAME,
+            f"{APP_NAME} is already running.\nCheck your taskbar.",
+            parent=_tmp)
+        _tmp.destroy()
+        return
+
     base = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
             else os.path.dirname(os.path.abspath(__file__)))
 
