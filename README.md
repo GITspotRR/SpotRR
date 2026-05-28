@@ -96,7 +96,7 @@ bash setup.sh
 
 ---
 
-### Manual launch (any OS after setup)
+### Auto-launch (any OS after setup)
 
 ```bash
 # Windows
