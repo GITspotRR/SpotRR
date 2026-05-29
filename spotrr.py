@@ -40,6 +40,14 @@ if sys.platform == "win32":
         except Exception:
             pass
 
+    # Suppress CMD windows for ALL subprocesses (including spotdl's internal
+    # ffmpeg calls which we cannot control directly).
+    _orig_popen_init = subprocess.Popen.__init__
+    def _silent_popen_init(self, args, **kwargs):
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+        _orig_popen_init(self, args, **kwargs)
+    subprocess.Popen.__init__ = _silent_popen_init
+
 import tkinter as tk
 from tkinter import filedialog, font, messagebox, scrolledtext, simpledialog, ttk
 
