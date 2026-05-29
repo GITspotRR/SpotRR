@@ -191,6 +191,22 @@ def _spotify_call(fn, *args, **kwargs):
     raise RuntimeError("Max retries reached")
 
 
+# ── Resource path helpers ─────────────────────────────────────────────────────
+
+def _resource(rel: str) -> str:
+    """Resolve a bundled asset path — works in both dev and PyInstaller one-file builds."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, rel)
+
+
+def _ffmpeg_exe() -> str | None:
+    """Return the path to the bundled ffmpeg.exe, or None when not available."""
+    if sys.platform != "win32":
+        return None
+    path = _resource(os.path.join("assets", "ffmpeg.exe"))
+    return path if os.path.isfile(path) else None
+
+
 # ── Subprocess helpers ────────────────────────────────────────────────────────
 
 def _win_flags() -> dict:
@@ -459,12 +475,16 @@ class SpotRRApp:
         self._ensure_ffmpeg()
 
     def _ensure_ffmpeg(self) -> None:
-        """Auto-download FFmpeg via spotdl if it is not already available."""
+        """Verify FFmpeg is available — uses the bundled binary when running from the .exe."""
+        if _ffmpeg_exe():
+            self._log("✅  FFmpeg ready (bundled)", "success")
+            return
+
         suffix = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
         home   = os.path.expanduser("~")
         spotdl_paths = [
-            os.path.join(home, ".spotdl",        suffix),   # spotdl 4.x
-            os.path.join(home, ".config", "spotdl", suffix), # spotdl 3.x
+            os.path.join(home, ".spotdl",        suffix),
+            os.path.join(home, ".config", "spotdl", suffix),
         ]
         if shutil.which("ffmpeg") or any(os.path.exists(p) for p in spotdl_paths):
             self._log("✅  FFmpeg ready", "success")
@@ -472,7 +492,8 @@ class SpotRRApp:
 
         self._log("📦  FFmpeg not found — downloading automatically (one-time setup)…", "info")
         try:
-            result = subprocess.run(
+            spotdl_ffmpeg = spotdl_paths[0]
+            subprocess.run(
                 [sys.executable, "-m", "spotdl", "--download-ffmpeg"],
                 capture_output=True, text=True, timeout=180, **_win_flags())
             if os.path.exists(spotdl_ffmpeg) or shutil.which("ffmpeg"):
@@ -510,12 +531,11 @@ class SpotRRApp:
             path = cfg.get("custom_logo_path", "")
             if not path or not os.path.exists(path):
                 candidates = [
+                    _resource(os.path.join("assets", "logo.png")),
+                    _resource(os.path.join("assets", "logo.jpg")),
                     os.path.join(self._base, "assets", "logo.png"),
-                    os.path.join(self._base, "assets", "logo.jpg"),
                     os.path.join(self._base, "logo.png"),
                 ]
-                if hasattr(sys, "_MEIPASS"):
-                    candidates.append(os.path.join(sys._MEIPASS, "logo.png"))
                 path = next((p for p in candidates if os.path.exists(p)), None)
 
             if not path:
@@ -1445,7 +1465,7 @@ class SpotRRApp:
 
     def _build_cmd(self, url: str, folder: str, fmt: str, quality: str,
                    threads: int | None = None) -> list[str]:
-        return [
+        cmd = [
             sys.executable, "-m", "spotdl",
             *self._auth_args(),
             "download", url,
@@ -1454,6 +1474,10 @@ class SpotRRApp:
             "--bitrate", quality,
             "--threads", str(threads or self.batch_size),
         ]
+        ffmpeg = _ffmpeg_exe()
+        if ffmpeg:
+            cmd += ["--ffmpeg", ffmpeg]
+        return cmd
 
     def _interruptible_sleep(self, seconds: float) -> bool:
         """Sleep in 100 ms increments, returning False if stop is requested."""
@@ -1510,9 +1534,13 @@ class SpotRRApp:
         if not self.is_downloading:
             return False
         try:
+            fallback_cmd = [sys.executable, "-m", "spotdl", "download", url,
+                            "--output", folder, "--format", fmt, "--bitrate", quality]
+            ffmpeg = _ffmpeg_exe()
+            if ffmpeg:
+                fallback_cmd += ["--ffmpeg", ffmpeg]
             r = subprocess.run(
-                [sys.executable, "-m", "spotdl", "download", url,
-                 "--output", folder, "--format", fmt, "--bitrate", quality],
+                fallback_cmd,
                 capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=600,
                 env=self._enc_env(), **_win_flags())
@@ -1690,8 +1718,8 @@ class SpotRRApp:
 
     def _create_shortcut_worker(self) -> None:
         base   = self._base
-        icon   = os.path.join(base, "assets", "icon.ico")
-        logo   = os.path.join(base, "assets", "logo.png")
+        icon   = _resource(os.path.join("assets", "icon.ico"))
+        logo   = _resource(os.path.join("assets", "logo.png"))
         script = os.path.join(base, "spotrr.py")
 
         try:
@@ -2112,7 +2140,7 @@ class SpotRRApp:
         # Priority: 1) pre-made PNG in assets/qr/  2) auto-generate  3) skip
         qr_shown = False
         if addr and PIL_AVAILABLE:
-            qr_file = os.path.join(self._base, "assets", "qr", f"{coin}.png")
+            qr_file = _resource(os.path.join("assets", "qr", f"{coin}.png"))
             if os.path.exists(qr_file):
                 try:
                     img = Image.open(qr_file).convert("RGBA")
