@@ -1522,7 +1522,7 @@ class SpotRRApp:
         else:
             self._log(
                 f"⚠️  {ok}/{denominator} tracks downloaded · {fail} failed\n"
-                f"     Failed tracks may be unavailable on YouTube Music right now.\n"
+                f"     Failed tracks may be unavailable right now.\n"
                 f"     Try again later or check with a VPN.",
                 "warning")
             self._set_status(
