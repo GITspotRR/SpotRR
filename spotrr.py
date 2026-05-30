@@ -357,14 +357,15 @@ class SpotRRApp:
             if not (cid and cs):
                 return
             settings = {
-                "output":       os.path.join(os.path.expanduser("~"), "Downloads", "SpotRR"),
-                "format":       self.format_var.get(),
-                "bitrate":      self.quality_var.get(),
-                "threads":      self.batch_size,
-                "ffmpeg":       _ffmpeg_exe() or "ffmpeg",
-                "simple_tui":   True,
-                "print_errors": False,
-                "log_format":   None,
+                "output":           os.path.join(os.path.expanduser("~"), "Downloads", "SpotRR"),
+                "format":           self.format_var.get(),
+                "bitrate":          self.quality_var.get(),
+                "threads":          self.batch_size,
+                "ffmpeg":           _ffmpeg_exe() or "ffmpeg",
+                "audio_providers":  ["youtube-music", "youtube", "soundcloud", "slider-kz"],
+                "simple_tui":       True,
+                "print_errors":     False,
+                "log_format":       None,
             }
             self._spotdl_client   = _Spotdl(client_id=cid, client_secret=cs,
                                             downloader_settings=settings)
@@ -1578,14 +1579,15 @@ class SpotRRApp:
         init_key = (cid or "", cs or "", self.batch_size)
 
         settings = {
-            "output":       folder,
-            "format":       fmt,
-            "bitrate":      quality,
-            "threads":      self.batch_size,
-            "ffmpeg":       ffmpeg,
-            "simple_tui":   True,
-            "print_errors": False,
-            "log_format":   None,
+            "output":           folder,
+            "format":           fmt,
+            "bitrate":          quality,
+            "threads":          self.batch_size,
+            "ffmpeg":           ffmpeg,
+            "audio_providers":  ["youtube-music", "youtube", "soundcloud", "slider-kz"],
+            "simple_tui":       True,
+            "print_errors":     False,
+            "log_format":       None,
         }
 
         # ── Reuse cached client or create a new one ───────────────────────────
