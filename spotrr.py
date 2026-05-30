@@ -2560,6 +2560,16 @@ def main() -> None:
     for d in ("logs", "downloads"):
         os.makedirs(os.path.join(base, d), exist_ok=True)
 
+    # Tell Windows this is its own app (not python.exe) so the taskbar
+    # shows our icon instead of the Python icon.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "spotrr.app.2")
+        except Exception:
+            pass
+
     root = tk.Tk()
 
     icon = os.path.join(base, "assets", "icon.ico")

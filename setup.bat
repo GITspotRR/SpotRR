@@ -1,6 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
-title SpotRR — Setup
+title SpotRR Setup
 color 0A
 cls
 
