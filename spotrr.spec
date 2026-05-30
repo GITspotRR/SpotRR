@@ -7,7 +7,8 @@ from PyInstaller.utils.hooks import collect_data_files
 
 block_cipher = None
 
-spotdl_data = collect_data_files('spotdl')
+spotdl_data     = collect_data_files('spotdl')
+tls_client_data = collect_data_files('tls_client')  # bundles tls-client-64.dll etc.
 
 # FFmpeg is bundled only on Windows (assets/ffmpeg.exe must exist at build time).
 # On macOS/Linux spotdl downloads it automatically on first launch.
@@ -37,6 +38,7 @@ a = Analysis(
         ('assets', 'assets'),
         ('settings.json', '.'),
         *spotdl_data,
+        *tls_client_data,
     ],
     hiddenimports=[
         'tkinter', 'tkinter.filedialog', 'tkinter.messagebox',
@@ -50,6 +52,7 @@ a = Analysis(
         'tkinterdnd2',
         'requests', 'tqdm',
         'certifi', 'urllib3',
+        'tls_client',
     ],
     hookspath=[],
     hooksconfig={},
