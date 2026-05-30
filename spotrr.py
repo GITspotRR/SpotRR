@@ -40,11 +40,16 @@ if sys.platform == "win32":
         except Exception:
             pass
 
-    # Suppress CMD windows for ALL subprocesses (including spotdl's internal
-    # ffmpeg calls which we cannot control directly).
+    # Suppress CMD windows for all subprocesses in THIS process.
+    # For child processes (spotdl), see rthook_no_console.py.
     _orig_popen_init = subprocess.Popen.__init__
     def _silent_popen_init(self, args, **kwargs):
         kwargs["creationflags"] = kwargs.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+        if "startupinfo" not in kwargs:
+            _si = subprocess.STARTUPINFO()
+            _si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            _si.wShowWindow = 0  # SW_HIDE
+            kwargs["startupinfo"] = _si
         _orig_popen_init(self, args, **kwargs)
     subprocess.Popen.__init__ = _silent_popen_init
 
