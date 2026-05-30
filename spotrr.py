@@ -460,6 +460,8 @@ class SpotRRApp:
     def _check_and_install_deps(self) -> None:
         if getattr(sys, "frozen", False):
             self._log("✅  Portable mode — dependencies bundled", "success")
+            # FFmpeg is bundled; Deno is downloaded at runtime (not bundled).
+            self._ensure_deno()
             return
 
         # ── Python packages ───────────────────────────────────────────────────
@@ -482,8 +484,9 @@ class SpotRRApp:
                 except subprocess.CalledProcessError as exc:
                     self._log(f"     ⚠️  {pkg}: {exc.stderr[:80]}", "warning")
 
-        # ── FFmpeg ────────────────────────────────────────────────────────────
+        # ── FFmpeg & Deno ─────────────────────────────────────────────────────
         self._ensure_ffmpeg()
+        self._ensure_deno()
 
     def _ensure_ffmpeg(self) -> None:
         """Verify FFmpeg is available — uses the bundled binary when running from the .exe."""
@@ -518,6 +521,27 @@ class SpotRRApp:
             self._log("⚠️  FFmpeg download timed out — retrying on next launch", "warning")
         except Exception as exc:
             self._log(f"⚠️  FFmpeg setup error: {exc}", "warning")
+
+    def _ensure_deno(self) -> None:
+        """Ensure Deno is available — required for some YouTube Music tracks."""
+        try:
+            from spotdl.utils.deno import download_deno, is_deno_installed
+        except ImportError:
+            return  # older spotdl version without Deno support
+
+        if is_deno_installed():
+            self._log("✅  Deno ready", "success")
+            return
+
+        self._log("📦  Deno not found — downloading automatically (one-time setup)…", "info")
+        try:
+            path = download_deno()
+            if path and path.is_file():
+                self._log("✅  Deno downloaded and ready", "success")
+            else:
+                self._log("⚠️  Deno download may have failed — some tracks may not download", "warning")
+        except Exception as exc:
+            self._log(f"⚠️  Deno setup error: {exc}", "warning")
 
     # ── Logo ──────────────────────────────────────────────────────────────────
 
@@ -1597,16 +1621,32 @@ class SpotRRApp:
             if not self.is_downloading:
                 return False
 
-            # download_songs uses an internal thread pool (batch_size threads in parallel).
-            # Because spotdl runs in-process, every subprocess.Popen call (including
-            # yt-dlp's ffmpeg invocations) goes through our patched __init__ which
-            # always adds CREATE_NO_WINDOW — no visible CMD windows.
-            results = client.download_songs(songs)
+            # ── Download with automatic retries ───────────────────────────────
+            # download_songs runs spotdl's internal thread pool in-process, so
+            # every yt-dlp ffmpeg call goes through our patched Popen → no CMD windows.
+            MAX_ROUNDS = 3
+            pending    = list(songs)
 
-            # Use return values for the authoritative final counts.
-            self._dl_ok   = sum(1 for _, p in results if p is not None)
-            self._dl_fail = len(results) - self._dl_ok
+            for round_n in range(1, MAX_ROUNDS + 1):
+                if not self.is_downloading or not pending:
+                    break
 
+                if round_n > 1:
+                    self._log(
+                        f"⏳  Auto-retry {round_n - 1}/{MAX_ROUNDS - 1} — "
+                        f"{len(pending)} track{'s' if len(pending) != 1 else ''} remaining…",
+                        "warning")
+                    # Brief pause between retries to avoid immediate rate-limiting
+                    for _ in range(30):
+                        if not self.is_downloading:
+                            break
+                        time.sleep(0.1)
+
+                results = client.download_songs(pending)
+                self._dl_ok += sum(1 for _, p in results if p is not None)
+                pending      = [song for song, p in results if p is None]
+
+            self._dl_fail = len(pending)
             return True
 
         except Exception as exc:
