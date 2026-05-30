@@ -1633,7 +1633,7 @@ class SpotRRApp:
                         if _round[0] == 0:  # only show on first attempt
                             m = re.search(r"for song:\s*(.+)", msg)
                             name = m.group(1).strip() if m else msg
-                            _app._log(f"⚠️  Not found on YouTube Music: {name}", "warning")
+                            _app._log(f"⚠️  Not found: {name}", "warning")
 
                     elif "AudioProviderError" in msg or "YT-DLP download error" in msg:
                         if _round[0] == 0:
@@ -1713,7 +1713,7 @@ class SpotRRApp:
             if pending:
                 names = ", ".join(s.display_name for s in pending)
                 self._log(
-                    f"ℹ️   Could not find on YouTube Music: {names}\n"
+                    f"ℹ️   Could not find: {names}\n"
                     "     These tracks may not be available — try later or with a VPN.",
                     "info")
 
