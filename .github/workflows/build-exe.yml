@@ -1,20 +1,19 @@
-name: Build Windows EXE
+name: Build — Windows · macOS · Linux
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:          # permite lanzarlo manualmente desde GitHub
+  workflow_dispatch:
 
 jobs:
-  build:
+
+  # ── Windows ──────────────────────────────────────────────────────────────────
+  build-windows:
     runs-on: windows-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -26,26 +25,79 @@ jobs:
           pip install -r requirements.txt
 
       - name: Download FFmpeg into assets/
+        shell: powershell
         run: |
           python -m spotdl --download-ffmpeg
           copy "$env:USERPROFILE\.spotdl\ffmpeg.exe" "assets\ffmpeg.exe"
-        shell: powershell
-
-      - name: Ensure settings.json exists
-        run: |
-          if (!(Test-Path "settings.json")) {
-            '{"client_id":"","client_secret":"","default_output_folder":""}' |
-              Out-File -FilePath "settings.json" -Encoding utf8
-          }
-        shell: powershell
 
       - name: Build EXE
         run: pyinstaller spotrr.spec --clean
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: SpotRR-Windows-x64
           path: dist/SpotRR.exe
+          if-no-files-found: error
+          retention-days: 90
+
+  # ── macOS ─────────────────────────────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      - name: Build .app
+        run: pyinstaller spotrr.spec --clean
+
+      - name: Zip .app bundle
+        run: |
+          cd dist
+          zip -r SpotRR-macOS.zip SpotRR.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpotRR-macOS
+          path: dist/SpotRR-macOS.zip
+          if-no-files-found: error
+          retention-days: 90
+
+  # ── Linux ─────────────────────────────────────────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system tkinter
+        run: sudo apt-get install -y python3-tk
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      - name: Build binary
+        run: pyinstaller spotrr.spec --clean
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpotRR-Linux-x64
+          path: dist/SpotRR
           if-no-files-found: error
           retention-days: 90

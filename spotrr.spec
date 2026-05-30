@@ -1,21 +1,38 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for SpotRR
+# PyInstaller spec for SpotRR — Windows · macOS · Linux
 # Build: pyinstaller spotrr.spec
 
-import os
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+import os, sys
+from PyInstaller.utils.hooks import collect_data_files
 
 block_cipher = None
 
-# Collect data files for spotdl
 spotdl_data = collect_data_files('spotdl')
+
+# FFmpeg is bundled only on Windows (assets/ffmpeg.exe must exist at build time).
+# On macOS/Linux spotdl downloads it automatically on first launch.
+_binaries = []
+if sys.platform == 'win32' and os.path.exists('assets/ffmpeg.exe'):
+    _binaries = [('assets/ffmpeg.exe', 'assets')]
+
+# settings.json is optional — create a blank one if missing so the build doesn't fail.
+if not os.path.exists('settings.json'):
+    with open('settings.json', 'w') as _f:
+        _f.write('{"client_id":"","client_secret":"","default_output_folder":""}')
+
+# Icon: .icns for macOS, .ico for Windows/Linux
+_icon = (
+    'assets/icon.icns' if sys.platform == 'darwin' and os.path.exists('assets/icon.icns')
+    else 'assets/icon.ico'
+)
+
+# Runtime hook (CREATE_NO_WINDOW) is Windows-only
+_runtime_hooks = ['rthook_no_console.py'] if sys.platform == 'win32' else []
 
 a = Analysis(
     ['spotrr.py'],
     pathex=[],
-    binaries=[
-        ('assets/ffmpeg.exe', 'assets'),
-    ],
+    binaries=_binaries,
     datas=[
         ('assets', 'assets'),
         ('settings.json', '.'),
@@ -36,7 +53,7 @@ a = Analysis(
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=['rthook_no_console.py'],
+    runtime_hooks=_runtime_hooks,
     excludes=['matplotlib', 'numpy', 'scipy', 'pandas', 'jupyter'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -66,6 +83,20 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='assets/icon.ico',
+    icon=_icon,
     version_file=None,
 )
+
+# macOS: wrap the EXE inside a proper .app bundle
+if sys.platform == 'darwin':
+    app = BUNDLE(
+        exe,
+        name='SpotRR.app',
+        icon=_icon,
+        bundle_identifier='com.spotrr.app',
+        info_plist={
+            'CFBundleShortVersionString': '2.1.0',
+            'CFBundleVersion':            '2.1.0',
+            'NSHighResolutionCapable':    True,
+        },
+    )
