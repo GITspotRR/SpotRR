@@ -40,17 +40,23 @@ if sys.platform == "win32":
         except Exception:
             pass
 
-    # Suppress CMD windows for all subprocesses in THIS process.
-    # For child processes (spotdl), see rthook_no_console.py.
-    _orig_popen_init = subprocess.Popen.__init__
+    # Patch subprocess.Popen so every process spawned from this app (including
+    # yt-dlp's ffmpeg calls, which run in-process via the spotdl API) never
+    # opens a visible CMD/console window on Windows.
+    _CREATE_NO_WINDOW = 0x08000000
+    _orig_popen_init  = subprocess.Popen.__init__
+
     def _silent_popen_init(self, args, **kwargs):
-        kwargs["creationflags"] = kwargs.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+        cf = kwargs.get("creationflags", 0) & ~0x00000010  # strip CREATE_NEW_CONSOLE
+        cf |= _CREATE_NO_WINDOW
+        kwargs["creationflags"] = cf
         if "startupinfo" not in kwargs:
             _si = subprocess.STARTUPINFO()
             _si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             _si.wShowWindow = 0  # SW_HIDE
             kwargs["startupinfo"] = _si
         _orig_popen_init(self, args, **kwargs)
+
     subprocess.Popen.__init__ = _silent_popen_init
 
 import tkinter as tk
@@ -1495,69 +1501,123 @@ class SpotRRApp:
 
     def _run_spotdl(self, url: str, folder: str, fmt: str, quality: str,
                     max_attempts: int = 3) -> bool:
-        for attempt in range(1, max_attempts + 1):
+        """Download via spotdl's Python API (in-process).
+
+        Running spotdl in-process means yt-dlp's internal ffmpeg calls go through
+        the same subprocess.Popen that we've already patched with CREATE_NO_WINDOW,
+        so no CMD/ffmpeg windows ever appear on Windows.
+        """
+        import logging as _logging
+
+        try:
+            from spotdl import Spotdl as _Spotdl
+        except ImportError:
+            self._log("❌  spotdl not available — run setup.bat or pip install spotdl", "error")
+            return False
+
+        cid, cs = self._get_creds()
+        ffmpeg   = _ffmpeg_exe() or "ffmpeg"
+
+        settings = {
+            "output":       folder,
+            "format":       fmt,
+            "bitrate":      quality,
+            "threads":      self.batch_size,
+            "ffmpeg":       ffmpeg,
+            "simple_tui":   True,   # disable spotdl's own terminal UI
+            "print_errors": False,
+            "log_format":   None,
+        }
+
+        # Route key spotdl log messages to our GUI console in real time.
+        _completed = [0]
+        _app       = self
+
+        class _Fwd(_logging.Handler):
+            def emit(self, record: _logging.LogRecord) -> None:
+                try:
+                    msg = self.format(record)
+                    lvl = record.levelno
+
+                    if 'Downloaded "' in msg or "Downloaded '" in msg:
+                        _completed[0] += 1
+                        done  = _completed[0]
+                        total = _app._dl_total
+                        if total > 0:
+                            _app._set_progress(int(done / total * 100))
+                            _app._set_status(
+                                f"Downloading…  {done}/{total} tracks", C["green"])
+                        m    = re.search(r'Downloaded ["\'](.+?)["\']', msg)
+                        name = m.group(1) if m else "track"
+                        _app._log(f"✅  [{done}/{total}]  {name}", "success")
+
+                    elif "Skipping" in msg:
+                        _app._log(f"ℹ️   {msg}", "info")
+
+                    elif lvl >= _logging.ERROR:
+                        _app._log(msg, "error")
+
+                    elif lvl >= _logging.WARNING and "spotdl" in record.name:
+                        _app._log(msg, "warning")
+
+                except Exception:
+                    pass
+
+        handler = _Fwd()
+        handler.setFormatter(_logging.Formatter("%(message)s"))
+
+        watched: list[tuple[_logging.Logger, int]] = []
+        for lg_name in ("spotdl", "yt_dlp"):
+            lg = _logging.getLogger(lg_name)
+            lg.addHandler(handler)
+            watched.append((lg, lg.level))
+            lg.setLevel(_logging.INFO)
+
+        try:
+            client = _Spotdl(
+                client_id=cid or "",
+                client_secret=cs or "",
+                downloader_settings=settings,
+            )
+
             if not self.is_downloading:
                 return False
 
-            cmd = self._build_cmd(url, folder, fmt, quality)
-            self._log(f"⚙️   Attempt {attempt}/{max_attempts}", "info")
+            songs = client.search([url])
+            self._dl_total = len(songs)
 
-            try:
-                self.current_process = _popen(
-                    cmd,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, encoding="utf-8", errors="replace",
-                    bufsize=1, env=self._enc_env())
+            if not songs:
+                self._log("❌  No songs found for this URL", "error")
+                return False
 
-                for raw in iter(self.current_process.stdout.readline, ""):
-                    if not self.is_downloading:
-                        break
-                    while self.download_paused and self.is_downloading:
-                        time.sleep(0.1)
-                    self._handle_spotdl_line(raw.rstrip())
+            self._log(
+                f"ℹ️   Found {self._dl_total} song{'s' if self._dl_total != 1 else ''}",
+                "info")
 
-                self.current_process.stdout.close()
-                rc = self.current_process.wait()
-                self.current_process = None
+            if not self.is_downloading:
+                return False
 
-                if rc == 0:
-                    return True
-                self._log(f"⚠️   spotdl exited with code {rc}", "warning")
+            # download_songs uses an internal thread pool (batch_size threads in parallel).
+            # Because spotdl runs in-process, every subprocess.Popen call (including
+            # yt-dlp's ffmpeg invocations) goes through our patched __init__ which
+            # always adds CREATE_NO_WINDOW — no visible CMD windows.
+            results = client.download_songs(songs)
 
-            except Exception as exc:
-                self._log(f"⚠️   Process error: {exc}", "warning")
-                self.current_process = None
+            # Use return values for the authoritative final counts.
+            self._dl_ok   = sum(1 for _, p in results if p is not None)
+            self._dl_fail = len(results) - self._dl_ok
 
-            if attempt < max_attempts:
-                wait = 3 * attempt
-                self._log(f"⏳  Retry in {wait}s…", "info")
-                if not self._interruptible_sleep(wait):
-                    return False  # stop was requested during the wait
+            return True
 
-        # Single-thread, no-auth fallback
-        self._log("⚠️   Trying single-thread fallback…", "warning")
-        if not self.is_downloading:
-            return False
-        try:
-            fallback_cmd = [sys.executable, "-m", "spotdl", "download", url,
-                            "--output", folder, "--format", fmt, "--bitrate", quality]
-            ffmpeg = _ffmpeg_exe()
-            if ffmpeg:
-                fallback_cmd += ["--ffmpeg", ffmpeg]
-            r = subprocess.run(
-                fallback_cmd,
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=600,
-                env=self._enc_env(), **_win_flags())
-            for line in (r.stdout or "").splitlines():
-                self._handle_spotdl_line(line)
-            return r.returncode == 0
-        except subprocess.TimeoutExpired:
-            self._log("❌  Fallback timed out (10 min)", "error")
-            return False
         except Exception as exc:
-            self._log(f"❌  Fallback error: {exc}", "error")
+            self._log(f"❌  spotdl error: {exc}", "error")
             return False
+
+        finally:
+            for lg, lvl in watched:
+                lg.removeHandler(handler)
+                if lvl != _logging.NOTSET:
+                    lg.setLevel(lvl)
 
     def _handle_spotdl_line(self, line: str) -> None:
         """Route a single spotdl output line to the console or progress bar."""
