@@ -369,7 +369,8 @@ class SpotRRApp:
             }
             self._spotdl_client   = _Spotdl(client_id=cid, client_secret=cs,
                                             downloader_settings=settings)
-            self._spotdl_init_key = (cid, cs, self.batch_size)
+            self._spotdl_init_key = (cid, cs, self.batch_size,
+                                     ("youtube-music", "youtube", "soundcloud"))
         except Exception:
             pass  # will be created on demand in _run_spotdl
 
@@ -1709,6 +1710,27 @@ class SpotRRApp:
                 results = client.download_songs(pending)
                 self._dl_ok += sum(1 for _, p in results if p is not None)
                 pending      = [song for song, p in results if p is None]
+
+            # ── Last-resort: filter_results=False ────────────────────────────────
+            # If songs still pending, retry with unfiltered matching (takes the
+            # first search result from each provider without scoring). Riskier
+            # but finds songs whose titles don't score well enough to pass the
+            # default quality filter (special chars, very long names, etc.).
+            if pending and self.is_downloading:
+                self._log(
+                    f"⏳  Last resort — trying unfiltered search for "
+                    f"{len(pending)} track{'s' if len(pending) != 1 else ''}…",
+                    "warning")
+                _round[0] = MAX_ROUNDS  # suppress repeated error logs
+                for provider in client.downloader.audio_providers:
+                    provider.filter_results = False
+                try:
+                    results = client.download_songs(pending)
+                    self._dl_ok += sum(1 for _, p in results if p is not None)
+                    pending      = [song for song, p in results if p is None]
+                finally:
+                    for provider in client.downloader.audio_providers:
+                        provider.filter_results = True
 
             self._dl_fail = len(pending)
 
