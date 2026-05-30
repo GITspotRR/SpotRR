@@ -306,6 +306,10 @@ class SpotRRApp:
         self._base = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
                       else os.path.dirname(os.path.abspath(__file__)))
 
+        # Spotdl client cache — created once, reused across downloads
+        self._spotdl_client   = None
+        self._spotdl_init_key = None   # (cid, cs, threads)
+
         # Logo debounce timer
         self._logo_resize_timer: str | None = None
 
@@ -332,11 +336,41 @@ class SpotRRApp:
             self._create_shortcut()
             cfg["shortcut_created"] = True
             self._write_cfg(cfg)
+        # Pre-warm spotdl in background so first download starts instantly
+        threading.Thread(target=self._preload_spotdl, daemon=True).start()
 
     def _on_close(self) -> None:
         self._save_geometry()
         _release_instance()
         self.root.destroy()
+
+    def _preload_spotdl(self) -> None:
+        """Create the spotdl client in background during startup.
+
+        This warms up the spotdl import, creates the asyncio event loop, and
+        obtains a cached Spotify access token — so the first download starts
+        immediately without any noticeable delay.
+        """
+        try:
+            from spotdl import Spotdl as _Spotdl
+            cid, cs = self._get_creds()
+            if not (cid and cs):
+                return
+            settings = {
+                "output":       os.path.join(os.path.expanduser("~"), "Downloads", "SpotRR"),
+                "format":       self.format_var.get(),
+                "bitrate":      self.quality_var.get(),
+                "threads":      self.batch_size,
+                "ffmpeg":       _ffmpeg_exe() or "ffmpeg",
+                "simple_tui":   True,
+                "print_errors": False,
+                "log_format":   None,
+            }
+            self._spotdl_client   = _Spotdl(client_id=cid, client_secret=cs,
+                                            downloader_settings=settings)
+            self._spotdl_init_key = (cid, cs, self.batch_size)
+        except Exception:
+            pass  # will be created on demand in _run_spotdl
 
     # ── Paths & config ────────────────────────────────────────────────────────
 
@@ -1539,8 +1573,9 @@ class SpotRRApp:
             self._log("❌  spotdl not available — run setup.bat or pip install spotdl", "error")
             return False
 
-        cid, cs = self._get_creds()
+        cid, cs  = self._get_creds()
         ffmpeg   = _ffmpeg_exe() or "ffmpeg"
+        init_key = (cid or "", cs or "", self.batch_size)
 
         settings = {
             "output":       folder,
@@ -1548,13 +1583,32 @@ class SpotRRApp:
             "bitrate":      quality,
             "threads":      self.batch_size,
             "ffmpeg":       ffmpeg,
-            "simple_tui":   True,   # disable spotdl's own terminal UI
+            "simple_tui":   True,
             "print_errors": False,
             "log_format":   None,
         }
 
-        # Route key spotdl log messages to our GUI console in real time.
+        # ── Reuse cached client or create a new one ───────────────────────────
+        if self._spotdl_client is not None and self._spotdl_init_key == init_key:
+            client = self._spotdl_client
+            # Update the per-download mutable settings (output folder, format…)
+            for k in ("output", "format", "bitrate", "ffmpeg"):
+                client.downloader.settings[k] = settings[k]
+        else:
+            client = _Spotdl(
+                client_id=cid or "",
+                client_secret=cs or "",
+                downloader_settings=settings,
+            )
+            self._spotdl_client   = client
+            self._spotdl_init_key = init_key
+
+        # ── Log handler: routes spotdl messages to our GUI console ────────────
+        # _round[0] = 0 on first pass, 1+ on retries.
+        # LookupErrors are shown once (first pass); suppressed on retries to
+        # avoid spamming the console — a final summary is logged instead.
         _completed = [0]
+        _round     = [0]
         _app       = self
 
         class _Fwd(_logging.Handler):
@@ -1574,6 +1628,16 @@ class SpotRRApp:
                         m    = re.search(r'Downloaded ["\'](.+?)["\']', msg)
                         name = m.group(1) if m else "track"
                         _app._log(f"✅  [{done}/{total}]  {name}", "success")
+
+                    elif "No results found" in msg or "LookupError" in msg:
+                        if _round[0] == 0:  # only show on first attempt
+                            m = re.search(r"for song:\s*(.+)", msg)
+                            name = m.group(1).strip() if m else msg
+                            _app._log(f"⚠️  Not found on YouTube Music: {name}", "warning")
+
+                    elif "AudioProviderError" in msg or "YT-DLP download error" in msg:
+                        if _round[0] == 0:
+                            _app._log(f"⚠️  {msg}", "warning")
 
                     elif "Skipping" in msg:
                         _app._log(f"ℹ️   {msg}", "info")
@@ -1598,15 +1662,10 @@ class SpotRRApp:
             lg.setLevel(_logging.INFO)
 
         try:
-            client = _Spotdl(
-                client_id=cid or "",
-                client_secret=cs or "",
-                downloader_settings=settings,
-            )
-
             if not self.is_downloading:
                 return False
 
+            self._set_status("Searching Spotify…", C["blue"])
             songs = client.search([url])
             self._dl_total = len(songs)
 
@@ -1631,6 +1690,8 @@ class SpotRRApp:
                 if not self.is_downloading or not pending:
                     break
 
+                _round[0] = round_n - 1  # 0 = first attempt; 1+ = retries
+
                 if round_n > 1:
                     self._log(
                         f"⏳  Auto-retry {round_n - 1}/{MAX_ROUNDS - 1} — "
@@ -1647,6 +1708,15 @@ class SpotRRApp:
                 pending      = [song for song, p in results if p is None]
 
             self._dl_fail = len(pending)
+
+            # Log unfound songs as a clean final list (not repeated per retry)
+            if pending:
+                names = ", ".join(s.display_name for s in pending)
+                self._log(
+                    f"ℹ️   Could not find on YouTube Music: {names}\n"
+                    "     These tracks may not be available — try later or with a VPN.",
+                    "info")
+
             return True
 
         except Exception as exc:
