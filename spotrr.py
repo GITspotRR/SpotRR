@@ -362,7 +362,7 @@ class SpotRRApp:
                 "bitrate":          self.quality_var.get(),
                 "threads":          self.batch_size,
                 "ffmpeg":           _ffmpeg_exe() or "ffmpeg",
-                "audio_providers":  ["youtube-music", "youtube", "soundcloud", "slider-kz"],
+                "audio_providers":  ["youtube-music", "youtube", "soundcloud", "bandcamp"],
                 "simple_tui":       True,
                 "print_errors":     False,
                 "log_format":       None,
