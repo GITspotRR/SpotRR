@@ -1576,7 +1576,8 @@ class SpotRRApp:
 
         cid, cs  = self._get_creds()
         ffmpeg   = _ffmpeg_exe() or "ffmpeg"
-        init_key = (cid or "", cs or "", self.batch_size)
+        _providers = ("youtube-music", "youtube", "soundcloud")
+        init_key   = (cid or "", cs or "", self.batch_size, _providers)
 
         settings = {
             "output":           folder,
@@ -1584,7 +1585,7 @@ class SpotRRApp:
             "bitrate":          quality,
             "threads":          self.batch_size,
             "ffmpeg":           ffmpeg,
-            "audio_providers":  ["youtube-music", "youtube", "soundcloud", "slider-kz"],
+            "audio_providers":  ["youtube-music", "youtube", "soundcloud"],
             "simple_tui":       True,
             "print_errors":     False,
             "log_format":       None,
