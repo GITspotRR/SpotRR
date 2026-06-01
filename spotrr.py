@@ -2024,6 +2024,12 @@ class SpotRRApp:
                 client.downloader.settings[k] = settings[k]
             client.downloader.settings["audio_providers"] = settings["audio_providers"]
 
+            # Rebuild the asyncio Semaphore to match the current thread count.
+            # The semaphore is created once at Downloader.__init__ and never
+            # updated when settings["threads"] changes — so changing from 4 to 8
+            # threads in the UI had no effect on actual concurrency.
+            client.downloader.semaphore = asyncio.Semaphore(settings["threads"])
+
         # ── Log handler ────────────────────────────────────────────────────────
         # Tracks completed count for the progress bar.
         # _verbose[0] = True during first pass (show not-found inline),
@@ -2139,11 +2145,16 @@ class SpotRRApp:
                 return False
 
             # ── First pass: download in batches ───────────────────────────────
-            # Batching batch_size tracks at a time lets Pause and Stop take
-            # effect between batches instead of waiting for a full playlist.
+            # spotdl's asyncio.gather + Semaphore model fills empty slots the
+            # instant a song finishes — no idle time within a batch.  The only
+            # overhead is the gap between our manual batch calls.  Using a batch
+            # 8× the thread count (min 32) makes that gap negligible: with 4
+            # threads and 32 songs per batch, a straggler only idles slots for
+            # the final ≤4 songs of each batch instead of every batch of 4.
+            # Pause/Stop still works between batches.
             all_songs = list(songs)
             pending   = []
-            batch_sz  = max(1, self.batch_size)
+            batch_sz  = min(len(all_songs), max(self.batch_size * 8, 32))
 
             for i in range(0, len(all_songs), batch_sz):
                 if not _check_pause_stop():
@@ -2162,7 +2173,7 @@ class SpotRRApp:
                     f"⏳  Retry {retry_n}/2 — "
                     f"{len(pending)} track{'s' if len(pending) != 1 else ''} remaining…",
                     "warning")
-                for _ in range(30):   # 3-second rate-limit pause
+                for _ in range(10):   # 1-second pause before retry
                     if not self.is_downloading:
                         break
                     time.sleep(0.1)
