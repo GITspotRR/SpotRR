@@ -1320,7 +1320,8 @@ class SpotRRApp:
                         ar = _spotify_call(self.sp.artist, item_id)
                         return f"👤  {ar['name']}"
                 except Exception as exc:
-                    self._log(f"⚠️  API error: {exc}", "warning")
+                    if "403" not in str(exc):
+                        self._log(f"⚠️  API error: {exc}", "warning")
 
             fallback = {
                 "playlist": "📑  Spotify Playlist",
@@ -1897,7 +1898,8 @@ class SpotRRApp:
                             all_items.extend(page)
 
         except Exception as exc:
-            self._log(f"⚠️  Spotify fast-fetch failed, using fallback: {exc}", "warning")
+            if "403" not in str(exc):
+                self._log(f"⚠️  Spotify fast-fetch failed, using fallback: {exc}", "warning")
             return []
 
         songs = []
