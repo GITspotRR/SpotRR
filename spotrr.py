@@ -378,18 +378,52 @@ class SpotRRApp:
         self.root.destroy()
 
     def _preload_spotdl(self) -> None:
-        """Pre-import spotdl so the first download has no cold-start delay.
+        """Pre-create the spotdl client so the first download has no cold-start delay.
 
-        We intentionally do NOT create the Spotdl client here.  The client
-        owns an asyncio event loop that must be run from the same thread it
-        was created in.  Creating it in this startup thread and then running
-        downloads from a separate worker thread would be a cross-thread loop
-        violation.  The client is always created inside _run_spotdl, which
-        runs in the download worker thread.
+        spotdl's Spotdl.__init__ initialises SpotifyClient (FreeSpotify or official
+        spotipy), creates an asyncio event loop, and does an HTTP token fetch — all
+        of which take 2-5 s.  Doing it here in the background startup thread means
+        that delay is invisible to the user.
+
+        The asyncio event loop is NOT permanently bound to its creating thread in
+        Python 3.10+.  The download worker always calls
+            asyncio.set_event_loop(client.downloader.loop)
+        before touching the loop, which re-binds it to the worker thread.  No
+        cross-thread violation occurs.
         """
         try:
-            import spotdl as _  # noqa: F401  — warm up the import only
+            from spotdl import Spotdl as _Spotdl
+            from spotdl.utils.spotify import SpotifyClient as _SC
         except ImportError:
+            return
+
+        cid, cs   = self._get_creds()
+        creds_key = (cid or "", cs or "")
+        ffmpeg    = _find_ffmpeg()
+
+        try:
+            with self._spotdl_lock:
+                if self._spotdl_client is not None:
+                    return  # already created (user started a download first)
+                _SC._instance = None
+                client = _Spotdl(
+                    client_id=cid or "",
+                    client_secret=cs or "",
+                    downloader_settings={
+                        "output":          os.path.expanduser("~"),
+                        "format":          "mp3",
+                        "bitrate":         "320k",
+                        "threads":         4,
+                        "ffmpeg":          ffmpeg,
+                        "audio_providers": ["youtube-music", "youtube", "soundcloud"],
+                        "simple_tui":      True,
+                        "print_errors":    False,
+                        "log_format":      None,
+                    },
+                )
+                self._spotdl_client     = client
+                self._spotdl_init_creds = creds_key
+        except Exception:
             pass
 
     # ── Paths & config ────────────────────────────────────────────────────────
