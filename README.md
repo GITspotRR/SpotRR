@@ -66,6 +66,19 @@ setup.bat
 bash setup.sh
 ```
 
+### Update to a newer version
+
+You never need to delete the app folder to update.
+
+```bat
+:: Windows — pulls the latest code in place, installs changed
+:: dependencies and launches the app (keeps settings.json, downloads, .venv)
+update.bat
+```
+
+> Installed via `git clone`? `update.bat` just runs `git pull`.  
+> Installed from the ZIP? It downloads the latest version and replaces the files in place.
+
 ---
 
 ### Manual installation (Windows — no scripts)
