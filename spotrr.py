@@ -565,6 +565,28 @@ class SpotRRApp:
                 except subprocess.CalledProcessError as exc:
                     self._log(f"     ⚠️  {pkg}: {exc.stderr[:80]}", "warning")
 
+        # ── yt-dlp ────────────────────────────────────────────────────────────
+        # Keep yt-dlp current on every launch: YouTube changes break old
+        # releases (HTTP 403 → AudioProviderError, "No results found").
+        # If PyPI is unreachable, fall back to the known-good floor.
+        current = _ytdlp_version()
+        latest  = _ytdlp_latest_version()
+        target  = latest if latest is not None else _YTDLP_MIN
+        if current and target and current < target:
+            self._log(
+                f"⬆  Updating yt-dlp {'.'.join(map(str, current))} → "
+                f"{'.'.join(map(str, target))}…",
+                "info")
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp",
+                     "--quiet"],
+                    check=True, capture_output=True, text=True,
+                    timeout=300, **_win_flags())
+                self._log("✅  yt-dlp updated — restart recommended", "success")
+            except Exception as exc:
+                self._log(f"⚠️  yt-dlp update failed: {exc}", "warning")
+
         # ── FFmpeg & Deno ─────────────────────────────────────────────────────
         self._ensure_ffmpeg()
         self._ensure_deno()
@@ -2987,6 +3009,33 @@ def _pkg_available(pkg: str) -> bool:
         return True
     except ImportError:
         return False
+
+
+# Old yt-dlp releases get HTTP 403 from YouTube when fetching media streams,
+# which surfaces as spotdl's AudioProviderError and breaks every download.
+_YTDLP_MIN = (2026, 8, 19)  # first version verified to download from YouTube again
+
+
+def _ytdlp_version() -> tuple[int, ...]:
+    """Return the installed yt-dlp version as a (major, minor, patch) tuple."""
+    try:
+        import importlib.metadata as _md
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return tuple(int(x) for x in _md.version("yt-dlp").split(".")[:3])
+    except Exception:
+        return ()
+
+
+def _ytdlp_latest_version() -> tuple[int, ...] | None:
+    """Fetch the latest yt-dlp version from PyPI as a numeric tuple."""
+    try:
+        r = requests.get("https://pypi.org/pypi/yt-dlp/json", timeout=8)
+        if not r.ok:
+            return None
+        return tuple(int(x) for x in r.json()["info"]["version"].split(".")[:3])
+    except Exception:
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
