@@ -1997,8 +1997,13 @@ class SpotRRApp:
             self._log(f"\n{'─' * 50}")
             self._log(f"🎵  {label}", "song")
             self._log(f"📂  {folder}", "folder")
+            # The version travels with the batch header on purpose: it is the
+            # line people paste when reporting a problem, and two separate
+            # reports in a row turned out to be an outdated install on another
+            # machine.  Seeing which build is actually running settles that
+            # without any guessing.
             self._log(f"     {fmt.upper()} · {_quality_label(fmt, quality)}"
-                      f" · {self.batch_size} thread(s)")
+                      f" · {self.batch_size} thread(s)  ·  v{APP_VERSION}")
             self._log(f"{'─' * 50}\n")
 
             # Block Spotify downloads without credentials — they will always fail

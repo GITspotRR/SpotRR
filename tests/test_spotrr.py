@@ -1810,6 +1810,30 @@ class TestPrivatePlaylistFallback(unittest.TestCase):
         self.assertIn("No songs found for this URL", src)
 
 
+class TestVersionIsVisibleInTheLog(unittest.TestCase):
+    """The batch header must carry the version.
+
+    Twice now, a report about behaviour that was already fixed turned out to be
+    an outdated install on another machine.  The header is the line people
+    paste, so the version belongs there rather than in an About dialog nobody
+    opens.
+    """
+
+    def _header(self):
+        src = inspect.getsource(spotrr.SpotRRApp._worker)
+        i = src.index("thread(s)")
+        return src[max(0, i - 400):i + 200]
+
+    def test_batch_header_includes_the_version(self):
+        self.assertIn("v{APP_VERSION}", self._header())
+
+    def test_version_is_not_hardcoded(self):
+        # It has to follow the constant, or it will drift and lie.
+        header = self._header()
+        self.assertNotIn("v2.3.0", header)
+        self.assertNotIn("v2.2.0", header)
+
+
 class TestCrossFormatSkip(unittest.TestCase):
     """A file of one format must never suppress the download of another.
 
