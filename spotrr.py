@@ -101,6 +101,83 @@ APP_NAME    = "SpotRR"
 APP_VERSION = "2.2.0"
 APP_GITHUB  = "https://github.com/GITspotRR/SpotRR"
 
+# ── Audio quality choices ─────────────────────────────────────────────────────
+# MP3 is lossy, so real bitrate targets make sense for it.  WAV and FLAC are
+# lossless containers: a constant-bitrate target does nothing for them (ffmpeg
+# ignores it — verified: "320k" and "disable" produce byte-identical files), so
+# they expose a single "max" option instead.  "max" drops the bitrate constraint
+# entirely and lets the source pass through untouched.
+#
+# Note: the quality ceiling is set by the audio SOURCE, not by this app.  spotdl
+# sources audio from YouTube Music / SoundCloud (it has no Spotify audio
+# provider), so what arrives is a lossy stream; "max" cannot invent detail that
+# the source never had.  That is why the app now reports what it actually
+# produced instead of pretending a setting can raise the ceiling.
+MAX_QUALITY = "max"
+QUALITY_CHOICES: dict[str, tuple[tuple[str, str], ...]] = {
+    "mp3":  (("128k", "128k"), ("192k", "192k"), ("320k", "320k")),
+    "wav":  ((MAX_QUALITY, "Máx."),),
+    "flac": ((MAX_QUALITY, "Máx."),),
+}
+DEFAULT_QUALITY: dict[str, str] = {
+    "mp3": "320k", "wav": MAX_QUALITY, "flac": MAX_QUALITY,
+}
+# spotdl expects "disable" to mean "add no -b:a at all".
+SPOTDL_DISABLE_BITRATE = "disable"
+
+
+def _valid_quality(fmt: str, quality: str) -> str:
+    """Return `quality` when it is valid for `fmt`, else that format's default."""
+    choices = QUALITY_CHOICES.get(fmt)
+    if not choices:
+        return quality
+    if quality in {value for value, _ in choices}:
+        return quality
+    return DEFAULT_QUALITY.get(fmt, choices[0][0])
+
+
+def _quality_label(fmt: str, quality: str) -> str:
+    """Human-readable label for a quality value ('max' -> 'Máx.')."""
+    for value, label in (QUALITY_CHOICES.get(fmt) or ()):
+        if value == quality:
+            return label
+    return quality
+
+
+def _spotdl_bitrate(fmt: str, quality: str) -> str:
+    """Map a quality choice to the bitrate value spotdl expects.
+
+    "Máx." becomes spotdl's "disable", which omits -b:a from the ffmpeg command
+    entirely so the source reaches the encoder untouched.  Invalid input is
+    coerced first, so a hand-edited settings.json can never reach spotdl.
+    """
+    quality = _valid_quality(fmt, quality)
+    return SPOTDL_DISABLE_BITRATE if quality == MAX_QUALITY else quality
+
+
+def _probe_audio_spec(path) -> "tuple[int, int | None] | None":
+    """Return (sample_rate, bits_per_sample) for a WAV/FLAC file, or None.
+
+    Uses mutagen (already a required dependency) so there is no subprocess and
+    nothing to hide on Windows.  Only the two lossless container types are
+    probed; anything else returns None.
+    """
+    suffix = os.path.splitext(str(path))[1].lower()
+    if suffix not in (".wav", ".flac"):
+        return None
+    try:
+        if suffix == ".flac":
+            from mutagen.flac import FLAC as _Reader
+        else:
+            from mutagen.wave import WAVE as _Reader
+        info = _Reader(str(path)).info
+        rate = int(info.sample_rate)
+        bits = getattr(info, "bits_per_sample", None)
+        return rate, (int(bits) if bits else None)
+    except Exception:
+        return None
+
+
 CRYPTO_ADDRESSES: dict = {
     "BTC":   "bc1q6lz2yhwqcttjm8m7tr8jtd4sdnj3l7vgv36m0l",
     "ETH":   "0x556a352adF94B68ef0FC6a1274F1a76991502bBd",
@@ -475,6 +552,9 @@ class SpotRRApp:
                         "bitrate":         "320k",
                         "threads":         4,
                         "ffmpeg":          ffmpeg,
+                        # Must be present so a later refresh of the mutable keys
+                        # does not leave a stale value from spotdl's config file.
+                        "ffmpeg_args":     None,
                         "audio_providers": ["youtube-music", "youtube", "soundcloud"],
                         "simple_tui":      True,
                         "print_errors":    False,
@@ -527,8 +607,20 @@ class SpotRRApp:
 
     def _load_settings(self) -> None:
         s = self._read_cfg()
-        self.format_var.set(s.get("preferred_format", "mp3"))
-        self.quality_var.set(s.get("preferred_quality", "320k"))
+
+        # Validate format and quality against the current option table.  Older
+        # settings.json files (and hand-edits) can hold a format we no longer
+        # offer, or a bitrate that is invalid for the saved format — e.g. a
+        # "320k" left over from MP3 after switching to WAV.  Unvalidated, those
+        # values light up no button and are handed straight to spotdl.
+        fmt = s.get("preferred_format", "mp3")
+        if fmt not in QUALITY_CHOICES:
+            fmt = "mp3"
+        quality = _valid_quality(fmt, s.get("preferred_quality", "320k"))
+
+        self.format_var.set(fmt)
+        self.quality_var.set(quality)
+
         saved_threads = int(s.get("preferred_threads", 4))
         if saved_threads not in (2, 4, 8):
             saved_threads = 4
@@ -902,6 +994,19 @@ class SpotRRApp:
 
         self._build_donation(P)
 
+    def _seg_btn(self, parent: tk.Frame, text: str, cmd) -> tk.Button:
+        """Create one segment of a segmented control (shared by F/Q/T groups)."""
+        b = tk.Button(parent, text=text, command=cmd,
+                      bg=C["bg4"], fg=C["t2"], font=self.fn_small,
+                      bd=0, relief="flat", cursor="hand2", padx=10, pady=3,
+                      highlightthickness=0,
+                      activebackground=C["bg5"], activeforeground=C["t1"])
+        b.bind("<Enter>", lambda e, w=b: w.configure(bg=C["bg5"], fg=C["t1"])
+               if w.cget("bg") != C["green"] else None)
+        b.bind("<Leave>", lambda e, w=b: w.configure(bg=C["bg4"], fg=C["t2"])
+               if w.cget("bg") != C["green"] else None)
+        return b
+
     def _build_fqt(self, parent: tk.Frame) -> None:
         """Format / Quality / Threads segmented controls."""
         card = tk.Frame(parent, bg=C["bg3"])
@@ -917,36 +1022,22 @@ class SpotRRApp:
             btns.pack()
             return btns
 
-        def _seg_btn(parent: tk.Frame, text: str, cmd) -> tk.Button:
-            b = tk.Button(parent, text=text, command=cmd,
-                          bg=C["bg4"], fg=C["t2"], font=self.fn_small,
-                          bd=0, relief="flat", cursor="hand2", padx=10, pady=3,
-                          highlightthickness=0,
-                          activebackground=C["bg5"], activeforeground=C["t1"])
-            b.bind("<Enter>", lambda e, w=b: w.configure(bg=C["bg5"], fg=C["t1"])
-                   if w.cget("bg") != C["green"] else None)
-            b.bind("<Leave>", lambda e, w=b: w.configure(bg=C["bg4"], fg=C["t2"])
-                   if w.cget("bg") != C["green"] else None)
-            return b
-
         def _vsep():
             _divider(row, orient="v").pack(side="left", fill="y", padx=10)
 
         # Format
         fmt_btns = _group("Format")
         for lbl, val in (("MP3", "mp3"), ("WAV", "wav"), ("FLAC", "flac")):
-            b = _seg_btn(fmt_btns, lbl, lambda v=val: self._sel_fmt(v))
+            b = self._seg_btn(fmt_btns, lbl, lambda v=val: self._sel_fmt(v))
             b.pack(side="left")
             self.fmt_buttons[val] = b
 
         _vsep()
 
-        # Quality
-        q_btns = _group("Quality")
-        for q in ("128k", "192k", "320k"):
-            b = _seg_btn(q_btns, q, lambda v=q: self._sel_quality(v))
-            b.pack(side="left")
-            self.quality_buttons[q] = b
+        # Quality — options depend on the format, so the buttons are rebuilt
+        # whenever the format changes (see _rebuild_quality).
+        self.quality_box = _group("Quality")
+        self._rebuild_quality(self.format_var.get())
 
         _vsep()
 
@@ -954,7 +1045,7 @@ class SpotRRApp:
         t_btns = _group("Threads")
         for n in (2, 4, 8):
             label = "4 ★" if n == 4 else str(n)
-            b = _seg_btn(t_btns, label, lambda v=n: self._sel_batch(v))
+            b = self._seg_btn(t_btns, label, lambda v=n: self._sel_batch(v))
             b.pack(side="left")
             self.batch_buttons[n] = b
 
@@ -966,6 +1057,34 @@ class SpotRRApp:
                  bg=C["bg3"], fg=C["t3"],
                  font=font.Font(family="Segoe UI", size=7),
                  anchor="w").pack(fill="x", padx=12, pady=(4, 6))
+
+    def _rebuild_quality(self, fmt: str) -> None:
+        """Repopulate the Quality control with the options valid for `fmt`.
+
+        MP3 offers real bitrates; WAV/FLAC offer only "Máx." because a bitrate
+        target is meaningless for a lossless container.
+        """
+        box = getattr(self, "quality_box", None)
+        if box is not None and hasattr(box, "winfo_children"):
+            for child in box.winfo_children():
+                child.destroy()
+        self.quality_buttons.clear()
+
+        choices = QUALITY_CHOICES.get(fmt) or QUALITY_CHOICES["mp3"]
+        current = _valid_quality(fmt, self.quality_var.get())
+        self.quality_var.set(current)
+
+        if box is None:
+            return
+
+        for value, label in choices:
+            b = self._seg_btn(box, label, lambda v=value: self._sel_quality(v))
+            b.pack(side="left")
+            self.quality_buttons[value] = b
+
+        for v, b in self.quality_buttons.items():
+            b.configure(bg=C["green"] if v == current else C["bg4"],
+                        fg=C["t1"]   if v == current else C["t2"])
 
     def _build_toolbar(self, parent: tk.Frame) -> None:
         bar = tk.Frame(parent, bg=C["bg2"])
@@ -1315,17 +1434,30 @@ class SpotRRApp:
     # ── Toggle button state ───────────────────────────────────────────────────
 
     def _sel_fmt(self, val: str) -> None:
-        prev = self.format_var.get()
+        prev         = self.format_var.get()
+        prev_quality = self.quality_var.get()
         self.format_var.set(val)
         for v, b in self.fmt_buttons.items():
             b.configure(bg=C["green"] if v == val else C["bg4"],
                         fg=C["t1"]   if v == val else C["t2"])
-        if val != prev:
+        # Quality options are format-dependent: switching to WAV/FLAC offers
+        # "Máx." instead of MP3 bitrates, and vice versa.  Rebuild first so the
+        # highlighted button always exists.
+        self._rebuild_quality(val)
+        quality = self.quality_var.get()
+        if val != prev or quality != prev_quality:
             s = self._read_cfg()
             s["preferred_format"] = val
+            s["preferred_quality"] = quality
             self._write_cfg(s)
 
     def _sel_quality(self, val: str) -> None:
+        # Ignore a quality that does not belong to the current format — this can
+        # only happen if settings.json was hand-edited.
+        current = self.format_var.get()
+        allowed = {v for v, _ in (QUALITY_CHOICES.get(current) or ())}
+        if val not in allowed:
+            return
         prev = self.quality_var.get()
         self.quality_var.set(val)
         for v, b in self.quality_buttons.items():
@@ -1795,11 +1927,15 @@ class SpotRRApp:
             self._dl_ok    = 0
             self._dl_fail  = 0
             self._dl_total = 0
+            # {(sample_rate, bits): count} — what the encoder actually produced,
+            # so the summary can report the real result instead of the setting.
+            self._dl_specs = {}
 
             self._log(f"\n{'─' * 50}")
             self._log(f"🎵  {label}", "song")
             self._log(f"📂  {folder}", "folder")
-            self._log(f"     {fmt.upper()} · {quality} · {self.batch_size} thread(s)")
+            self._log(f"     {fmt.upper()} · {_quality_label(fmt, quality)}"
+                      f" · {self.batch_size} thread(s)")
             self._log(f"{'─' * 50}\n")
 
             # Block Spotify downloads without credentials — they will always fail
@@ -1853,6 +1989,7 @@ class SpotRRApp:
         if ok == 0 and fail == 0:
             self._log(f"✅  Complete: {label}", "success")
             self._set_status("Complete", C["green"])
+            self._log_real_specs()
             self._set_progress(100)
             self._notify("SpotRR — Download complete", label[:60])
             return
@@ -1874,7 +2011,28 @@ class SpotRRApp:
                 C["orange"])
             self._notify("SpotRR — Download finished",
                          f"{ok}/{denominator} tracks  ·  {fail} failed")
+        self._log_real_specs()
         self._set_progress(100)
+
+    def _log_real_specs(self) -> None:
+        """Report the sample rate / bit depth the downloads actually produced.
+
+        Only populated for WAV/FLAC, which is the whole point of the "Máx."
+        option: the quality ceiling is set by the source stream, so telling the
+        user what really came out is more useful than a bitrate label that
+        changes nothing.
+        """
+        specs = getattr(self, "_dl_specs", None) or {}
+        if not specs:
+            return
+        parts = []
+        # Sort by frequency, then bit depth; None depth sorts as 0.
+        for (rate, bits), count in sorted(
+                specs.items(), key=lambda kv: (kv[0][0], kv[0][1] or 0)):
+            detail = f"{rate} Hz · {bits} bit" if bits else f"{rate} Hz"
+            parts.append(f"{detail} ({count} track{'s' if count > 1 else ''})"
+                         if count > 1 else detail)
+        self._log(f"ℹ️   Actual output: {' · '.join(parts)}", "info")
 
     def _resolve_soundcloud_songs(self, url: str) -> list:
         """Resolve a SoundCloud URL to a list of Song objects with download_url set.
@@ -2139,6 +2297,24 @@ class SpotRRApp:
 
         return songs, False
 
+    def _record_specs(self, results) -> None:
+        """Accumulate the (sample_rate, bits) of files spotdl just produced.
+
+        Only WAV/FLAC are probed.  The tally is shown in the download summary:
+        when the source is a lossy stream there is no setting that raises the
+        quality ceiling, so reporting what was actually obtained is the only
+        honest option.
+        """
+        specs = getattr(self, "_dl_specs", None)
+        if specs is None:
+            specs = self._dl_specs = {}
+        for _song, path in results:
+            if path is None:
+                continue
+            spec = _probe_audio_spec(path)
+            if spec:
+                specs[spec] = specs.get(spec, 0) + 1
+
     def _run_spotdl(self, url: str, folder: str, fmt: str, quality: str) -> bool:
         """Download via spotdl's Python API (in-process, batched for pause/stop support)."""
         import logging as _logging
@@ -2154,12 +2330,22 @@ class SpotRRApp:
         creds_key  = (cid or "", cs or "")
         _providers = ("youtube-music", "youtube", "soundcloud")
 
+        # "Máx." means "no bitrate target": spotdl then omits -b:a entirely and
+        # the source stream reaches the encoder untouched.  Any other quality is
+        # a literal bitrate for spotdl.  Guard against a stale/invalid value so
+        # a hand-edited settings.json can never reach spotdl.
+        bitrate = _spotdl_bitrate(fmt, quality)
+
         settings = {
             "output":          folder,
             "format":          fmt,
-            "bitrate":         quality,
+            "bitrate":         bitrate,
             "threads":         self.batch_size,
             "ffmpeg":          ffmpeg,
+            # No ffmpeg_args: spotdl's own FFMPEG_FORMATS already pick the codec
+            # for the container (-codec:a flac / pcm_s16le).  Overriding the
+            # sample format here would only pad a lossy source with empty bits.
+            "ffmpeg_args":     None,
             "audio_providers": list(_providers),
             "simple_tui":      True,
             "print_errors":    False,
@@ -2190,7 +2376,7 @@ class SpotRRApp:
                 self._spotdl_init_creds = creds_key
 
             # Always refresh per-download settings on the cached client.
-            for k in ("output", "format", "bitrate", "threads"):
+            for k in ("output", "format", "bitrate", "threads", "ffmpeg_args"):
                 client.downloader.settings[k] = settings[k]
             client.downloader.settings["audio_providers"] = settings["audio_providers"]
 
@@ -2339,6 +2525,7 @@ class SpotRRApp:
                 results = client.download_songs(batch)
                 self._dl_ok += sum(1 for _, p in results if p is not None)
                 pending += [song for song, p in results if p is None]
+                self._record_specs(results)
 
             # ── Retries (up to 2) ─────────────────────────────────────────────
             _verbose[0] = False  # suppress per-track "Not found" during retries
@@ -2358,6 +2545,7 @@ class SpotRRApp:
                 results      = client.download_songs(pending)
                 self._dl_ok += sum(1 for _, p in results if p is not None)
                 pending      = [song for song, p in results if p is None]
+                self._record_specs(results)
 
             # ── Last resort: disable result-quality filter ────────────────────
             if pending and _check_pause_stop():
@@ -2374,6 +2562,7 @@ class SpotRRApp:
                     results      = client.download_songs(pending)
                     self._dl_ok += sum(1 for _, p in results if p is not None)
                     pending      = [song for song, p in results if p is None]
+                    self._record_specs(results)
                 finally:
                     for provider in toggled:
                         provider.filter_results = True

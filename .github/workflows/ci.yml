@@ -43,7 +43,7 @@ jobs:
       - name: Install minimal test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pillow requests qrcode[pil]
+          pip install pytest pillow requests mutagen qrcode[pil]
 
       - name: Run tests
         run: python -m pytest tests/ -v --tb=short

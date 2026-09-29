@@ -9,8 +9,10 @@ import os
 import json
 import logging
 import inspect
+import importlib.util
 import shutil
 import socket
+import struct
 import tempfile
 import threading
 import unittest
@@ -1339,6 +1341,402 @@ class TestPauseStopFlags(unittest.TestCase):
         threading.Thread(target=_stop, daemon=True).start()
         result = self._check_pause_stop(app)
         self.assertFalse(result)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Quality options — "Máx." for the lossless containers (WAV/FLAC)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _write_wav(path, sample_rate=48000, bits=16, channels=2, frames=64):
+    """Write a minimal but genuinely valid RIFF/WAVE file (no ffmpeg needed)."""
+    block_align = channels * bits // 8
+    byte_rate   = sample_rate * block_align
+    data        = b"\x00" * (frames * block_align)
+    header = (
+        b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVE"
+        + b"fmt " + struct.pack("<IHHIIHH", 16, 1, channels,
+                                 sample_rate, byte_rate, block_align, bits)
+        + b"data" + struct.pack("<I", len(data))
+    )
+    with open(path, "wb") as f:
+        f.write(header + data)
+    return path
+
+
+class TestQualityOptionTable(unittest.TestCase):
+    """The option table itself, plus the pure helpers built on it."""
+
+    def test_mp3_offers_real_bitrates(self):
+        self.assertEqual([v for v, _ in spotrr.QUALITY_CHOICES["mp3"]],
+                         ["128k", "192k", "320k"])
+
+    def test_wav_and_flac_offer_only_max(self):
+        for fmt in ("wav", "flac"):
+            self.assertEqual([v for v, _ in spotrr.QUALITY_CHOICES[fmt]],
+                             [spotrr.MAX_QUALITY])
+
+    def test_valid_quality_keeps_mp3_choice(self):
+        self.assertEqual(spotrr._valid_quality("mp3", "192k"), "192k")
+
+    def test_valid_quality_coerces_bitrate_left_over_from_mp3(self):
+        # The migration case: settings.json saved with format=flac while the
+        # quality was still an MP3 bitrate.  Previously this reached spotdl as
+        # a literal "320k" on a lossless container.
+        self.assertEqual(spotrr._valid_quality("wav", "320k"), spotrr.MAX_QUALITY)
+        self.assertEqual(spotrr._valid_quality("flac", "128k"), spotrr.MAX_QUALITY)
+
+    def test_valid_quality_coerces_garbage(self):
+        self.assertEqual(spotrr._valid_quality("mp3", "banana"), "320k")
+
+    def test_valid_quality_passes_through_unknown_format(self):
+        self.assertEqual(spotrr._valid_quality("ogg", "320k"), "320k")
+
+    def test_quality_label_humanises_max(self):
+        self.assertEqual(spotrr._quality_label("flac", "max"), "Máx.")
+
+    def test_quality_label_passes_bitrate_through(self):
+        self.assertEqual(spotrr._quality_label("mp3", "320k"), "320k")
+
+    def test_spotdl_bitrate_is_disable_for_max(self):
+        self.assertEqual(spotrr._spotdl_bitrate("flac", spotrr.MAX_QUALITY),
+                         "disable")
+
+    def test_spotdl_bitrate_keeps_mp3_target(self):
+        self.assertEqual(spotrr._spotdl_bitrate("mp3", "320k"), "320k")
+
+    def test_max_never_reaches_spotdl_as_a_literal(self):
+        # "max" is not a valid spotdl bitrate — it would end up in the ffmpeg
+        # command line as "-b:a max".
+        for fmt in ("mp3", "wav", "flac"):
+            self.assertNotEqual(spotrr._spotdl_bitrate(fmt, "max"), "max")
+
+
+class TestProbeAudioSpec(unittest.TestCase):
+    def test_ignores_mp3(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "a.mp3")
+            open(p, "wb").close()
+            self.assertIsNone(spotrr._probe_audio_spec(p))
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(spotrr._probe_audio_spec("/nope/does-not-exist.wav"))
+
+    def test_garbage_file_returns_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "a.flac")
+            with open(p, "wb") as f:
+                f.write(b"definitely not a flac stream")
+            self.assertIsNone(spotrr._probe_audio_spec(p))
+
+    def test_directory_returns_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(spotrr._probe_audio_spec(d))
+
+    @unittest.skipUnless(importlib.util.find_spec("mutagen.wave"),
+                         "mutagen not installed")
+    def test_reads_wav_16bit_48k(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = _write_wav(os.path.join(d, "a.wav"), 48000, 16)
+            self.assertEqual(spotrr._probe_audio_spec(p), (48000, 16))
+
+    @unittest.skipUnless(importlib.util.find_spec("mutagen.wave"),
+                         "mutagen not installed")
+    def test_reads_wav_24bit_96k(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = _write_wav(os.path.join(d, "a.wav"), 96000, 24)
+            self.assertEqual(spotrr._probe_audio_spec(p), (96000, 24))
+
+
+class TestRebuildQuality(unittest.TestCase):
+    """The Quality control is rebuilt per format."""
+
+    def setUp(self):
+        self.app = MagicMock(spec=spotrr.SpotRRApp)
+        self.app.quality_buttons = {}
+        self.app._rebuild_quality = \
+            spotrr.SpotRRApp._rebuild_quality.__get__(self.app, spotrr.SpotRRApp)
+        # A real box is needed because the method destroys the old children.
+        self.box = MagicMock()
+        self.app.quality_box = self.box
+        self.app._seg_btn = MagicMock(
+            side_effect=lambda parent, text, cmd: MagicMock(name=text))
+
+    def _run(self, fmt, current="320k"):
+        self.app.quality_var = MagicMock()
+        self.app.quality_var.get.return_value = current
+        self.app._rebuild_quality(fmt)
+        return self.app._seg_btn.call_args_list
+
+    def test_mp3_creates_three_buttons(self):
+        calls = self._run("mp3")
+        self.assertEqual([c[0][1] for c in calls], ["128k", "192k", "320k"])
+
+    def test_flac_creates_single_max_button(self):
+        calls = self._run("flac")
+        self.assertEqual([c[0][1] for c in calls], ["Máx."])
+
+    def test_wav_creates_single_max_button(self):
+        calls = self._run("wav")
+        self.assertEqual([c[0][1] for c in calls], ["Máx."])
+
+    def test_switching_to_flac_replaces_old_buttons(self):
+        self._run("mp3")
+        self.assertEqual(set(self.app.quality_buttons), {"128k", "192k", "320k"})
+        self._run("flac")
+        self.assertEqual(set(self.app.quality_buttons), {spotrr.MAX_QUALITY})
+
+    def test_old_buttons_are_destroyed(self):
+        self._run("mp3")
+        self.assertTrue(self.box.winfo_children.called)
+
+    def test_selection_coerces_stale_bitrate_on_format_change(self):
+        # Starting from MP3/320k and switching to FLAC must land on "max",
+        # not keep a bitrate that is invalid for the new container.
+        self._run("flac", current="320k")
+        self.app.quality_var.set.assert_called_once_with(spotrr.MAX_QUALITY)
+
+
+class TestSelQualityValidation(unittest.TestCase):
+    def setUp(self):
+        self.app = MagicMock(spec=spotrr.SpotRRApp)
+        self.app._sel_quality = \
+            spotrr.SpotRRApp._sel_quality.__get__(self.app, spotrr.SpotRRApp)
+        self.app.quality_buttons = {}
+        self.app.quality_var = MagicMock()
+        self.app.format_var = MagicMock()
+
+    def test_accepts_option_valid_for_current_format(self):
+        self.app.format_var.get.return_value = "flac"
+        self.app._sel_quality(spotrr.MAX_QUALITY)
+        self.app.quality_var.set.assert_called_once_with(spotrr.MAX_QUALITY)
+
+    def test_rejects_mp3_bitrate_while_format_is_flac(self):
+        self.app.format_var.get.return_value = "flac"
+        self.app._sel_quality("320k")
+        self.app.quality_var.set.assert_not_called()
+        self.app._write_cfg.assert_not_called()
+
+    def test_rejects_max_while_format_is_mp3(self):
+        self.app.format_var.get.return_value = "mp3"
+        self.app._sel_quality(spotrr.MAX_QUALITY)
+        self.app.quality_var.set.assert_not_called()
+
+    def test_rejects_unknown_value(self):
+        self.app.format_var.get.return_value = "mp3"
+        self.app._sel_quality("banana")
+        self.app.quality_var.set.assert_not_called()
+
+
+class TestLoadSettingsQualityValidation(unittest.TestCase):
+    def setUp(self):
+        self.app = MagicMock(spec=spotrr.SpotRRApp)
+        self.app._load_settings = \
+            spotrr.SpotRRApp._load_settings.__get__(self.app, spotrr.SpotRRApp)
+        self.app._defaults = lambda: spotrr.SpotRRApp._defaults(self.app)
+        self.app.format_var = MagicMock()
+        self.app.quality_var = MagicMock()
+        self.app.entry_folder = MagicMock()
+        self.app.fmt_buttons = {}
+        self.app.quality_buttons = {}
+        self.app.quality_box = MagicMock()
+        self.app._seg_btn = MagicMock(
+            side_effect=lambda parent, text, cmd: MagicMock(name=text))
+
+    def _load(self, cfg):
+        self.app._read_cfg = lambda: {**self.app._defaults(), **cfg}
+        self.app._load_settings()
+        return (self.app.format_var.set.call_args[0][0],
+                self.app.quality_var.set.call_args[0][0])
+
+    def test_valid_mp3_settings_preserved(self):
+        fmt, quality = self._load(
+            {"preferred_format": "mp3", "preferred_quality": "192k"})
+        self.assertEqual((fmt, quality), ("mp3", "192k"))
+
+    def test_unknown_format_falls_back_to_mp3(self):
+        fmt, _ = self._load({"preferred_format": "opus"})
+        self.assertEqual(fmt, "mp3")
+
+    def test_stale_bitrate_with_lossless_format_is_corrected(self):
+        fmt, quality = self._load(
+            {"preferred_format": "flac", "preferred_quality": "320k"})
+        self.assertEqual((fmt, quality), ("flac", spotrr.MAX_QUALITY))
+
+    def test_saved_max_for_flac_is_preserved(self):
+        fmt, quality = self._load(
+            {"preferred_format": "flac", "preferred_quality": spotrr.MAX_QUALITY})
+        self.assertEqual((fmt, quality), ("flac", spotrr.MAX_QUALITY))
+
+
+class TestRecordAndReportSpecs(unittest.TestCase):
+    """Tallying what was produced, and reporting it in the summary."""
+
+    def setUp(self):
+        self.app = MagicMock(spec=spotrr.SpotRRApp)
+        self.app._record_specs = \
+            spotrr.SpotRRApp._record_specs.__get__(self.app, spotrr.SpotRRApp)
+        self.app._log_real_specs = \
+            spotrr.SpotRRApp._log_real_specs.__get__(self.app, spotrr.SpotRRApp)
+        self.app._dl_specs = {}
+
+    def test_counts_each_downloaded_file(self):
+        results = [("s1", "/x/a.wav"), ("s2", "/x/b.wav"), ("s3", None)]
+        with patch.object(spotrr, "_probe_audio_spec",
+                          side_effect=lambda p: (48000, 16) if p else None):
+            self.app._record_specs(results)
+        self.assertEqual(self.app._dl_specs, {(48000, 16): 2})
+
+    def test_groups_mixed_specs(self):
+        results = [("s1", "/x/a.wav"), ("s2", "/x/b.wav"),
+                   ("s3", "/x/c.wav"), ("s4", "/x/d.wav")]
+        with patch.object(spotrr, "_probe_audio_spec",
+                          side_effect=lambda p: (48000, 16) if p == "/x/a.wav"
+                          else (44100, 16)):
+            self.app._record_specs(results)
+        self.assertEqual(self.app._dl_specs, {(48000, 16): 1, (44100, 16): 3})
+
+    def test_unprobeable_files_are_skipped(self):
+        with patch.object(spotrr, "_probe_audio_spec", return_value=None):
+            self.app._record_specs([("s1", "/x/a.mp3")])
+        self.assertEqual(self.app._dl_specs, {})
+
+    def test_report_shows_real_rate_and_depth(self):
+        self.app._dl_specs = {(48000, 16): 3}
+        self.app._log_real_specs()
+        logged = " ".join(str(c) for c in self.app._log.call_args_list)
+        self.assertIn("48000", logged)
+        self.assertIn("16 bit", logged)
+        self.assertIn("3 tracks", logged)
+
+    def test_report_is_silent_for_mp3(self):
+        # No specs recorded (MP3 is not probed) — must not print a stray line.
+        self.app._log_real_specs()
+        self.app._log.assert_not_called()
+
+    def test_report_handles_unknown_bit_depth(self):
+        self.app._dl_specs = {(48000, None): 1}
+        self.app._log_real_specs()
+        logged = " ".join(str(c) for c in self.app._log.call_args_list)
+        self.assertIn("48000", logged)
+        self.assertNotIn("None bit", logged)
+
+
+class TestSummaryReportsSpecsForLossless(unittest.TestCase):
+    def setUp(self):
+        self.app = MagicMock(spec=spotrr.SpotRRApp)
+        self.app._show_download_summary = \
+            spotrr.SpotRRApp._show_download_summary.__get__(
+                self.app, spotrr.SpotRRApp)
+        self.app._dl_ok, self.app._dl_fail, self.app._dl_total = 3, 0, 3
+        self.app._dl_specs = {(48000, 16): 3}
+
+    def test_success_path_reports_specs(self):
+        self.app._show_download_summary("Album")
+        self.app._log_real_specs.assert_called_once()
+
+    def test_zero_count_path_also_reports_specs(self):
+        self.app._dl_ok = self.app._dl_fail = 0
+        self.app._show_download_summary("Album")
+        self.app._log_real_specs.assert_called_once()
+
+
+class _FakeVar:
+    """Minimal stand-in for tk.StringVar (a MagicMock would not persist .set())."""
+
+    def __init__(self, value=""):
+        self._v = value
+
+    def get(self):
+        return self._v
+
+    def set(self, value):
+        self._v = value
+
+
+class TestSelFmtRebuildsQuality(unittest.TestCase):
+    """Switching format must swap the Quality options (MP3 bitrates <-> Máx.)."""
+
+    def setUp(self):
+        self.app = MagicMock(spec=spotrr.SpotRRApp)
+        self.app._sel_fmt = \
+            spotrr.SpotRRApp._sel_fmt.__get__(self.app, spotrr.SpotRRApp)
+        self.app._rebuild_quality = \
+            spotrr.SpotRRApp._rebuild_quality.__get__(self.app, spotrr.SpotRRApp)
+        self.app.fmt_buttons    = {"mp3": MagicMock(), "wav": MagicMock(),
+                                   "flac": MagicMock()}
+        self.app.quality_buttons = {}
+        self.app.quality_box     = MagicMock()
+        self.app._seg_btn = MagicMock(
+            side_effect=lambda parent, text, cmd: MagicMock(name=text))
+        self.app._read_cfg  = MagicMock(return_value={})
+        self.app._write_cfg = MagicMock()
+        self.app.format_var  = _FakeVar("mp3")
+        self.app.quality_var = _FakeVar("320k")
+
+    def test_switching_to_flac_replaces_bitrates_with_max(self):
+        self.app._sel_fmt("flac")
+        self.assertEqual(set(self.app.quality_buttons), {spotrr.MAX_QUALITY})
+
+    def test_switching_back_to_mp3_restores_bitrates(self):
+        self.app._sel_fmt("flac")
+        self.app._sel_fmt("mp3")
+        self.assertEqual(set(self.app.quality_buttons),
+                         {"128k", "192k", "320k"})
+
+    def test_stale_bitrate_is_coerced_on_format_switch(self):
+        self.app._sel_fmt("flac")
+        self.assertEqual(self.app.quality_var.get(), spotrr.MAX_QUALITY)
+
+    def test_persists_both_format_and_quality(self):
+        # The old settings.json wrote format=flac with a stale quality=320k
+        # because _sel_fmt never touched the quality.  Both must be coherent.
+        self.app._sel_fmt("flac")
+        saved = self.app._write_cfg.call_args[0][0]
+        self.assertEqual(saved["preferred_format"], "flac")
+        self.assertEqual(saved["preferred_quality"], spotrr.MAX_QUALITY)
+
+    def test_no_write_when_nothing_changed(self):
+        self.app._sel_fmt("mp3")   # already mp3/320k
+        self.app._write_cfg.assert_not_called()
+
+    def test_old_buttons_destroyed_on_every_switch(self):
+        self.app._sel_fmt("flac")
+        self.app._sel_fmt("mp3")
+        self.assertTrue(self.app.quality_box.winfo_children.called)
+
+
+class TestRunSpotdlWiring(unittest.TestCase):
+    """Guards on the spotdl hand-off.
+
+    _run_spotdl needs a live spotdl client, so these check the wiring in source
+    rather than executing a download.
+    """
+
+    def setUp(self):
+        self.source = inspect.getsource(spotrr.SpotRRApp._run_spotdl)
+
+    def test_specs_recorded_after_every_download_batch(self):
+        # Three call sites: first pass, retry pass, last resort.  Missing any of
+        # them makes the "Actual output" line under-report the batch.
+        self.assertEqual(self.source.count("self._record_specs(results)"), 3)
+
+    def test_ffmpeg_args_refreshed_on_cached_client(self):
+        import re
+        m = re.search(r"for k in \(([^)]*)\):", self.source)
+        self.assertIsNotNone(m, "per-download refresh loop not found")
+        self.assertIn("ffmpeg_args", m.group(1))
+
+    def test_bitrate_comes_from_the_mapping_helper(self):
+        self.assertIn("_spotdl_bitrate(fmt, quality)", self.source)
+
+    def test_settings_declare_no_ffmpeg_args(self):
+        # spotdl's FFMPEG_FORMATS already pick the codec for the container.
+        self.assertIn('"ffmpeg_args":     None', self.source)
+
+    def test_prewarm_client_declares_ffmpeg_args(self):
+        # Otherwise a reused pre-warm client could carry a stale value from
+        # spotdl's on-disk config.
+        self.assertIn('"ffmpeg_args":     None', inspect.getsource(spotrr))
 
 
 if __name__ == "__main__":

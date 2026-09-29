@@ -126,7 +126,7 @@ Option B — manually:
 | Feature | Details |
 |---|---|
 | **Formats** | MP3 · WAV · FLAC |
-| **Quality** | 128 kbps · 192 kbps · 320 kbps |
+| **Quality** | MP3: 128 / 192 / 320 kbps · WAV & FLAC: `Máx.` |
 | **Content** | Tracks · Albums · Playlists · Artists |
 | **Queue** | Multi-URL queue with reorder support |
 | **Threads** | 2 / 4 ★ / 8 parallel tasks |
@@ -167,6 +167,24 @@ Click the **🔑 Client ID** and **🔑 Client Secret** buttons in the toolbar �
 4. Repeat for as many URLs as you want
 5. Press **▶ Start** (or it starts automatically if the queue was empty)
 
+### About the `Máx.` quality for WAV / FLAC
+
+The **Quality** control follows the format. MP3 offers real bitrate targets
+(128 / 192 / 320 kbps). WAV and FLAC are lossless containers, where a constant
+bitrate means nothing — ffmpeg ignores it — so they offer a single `Máx.`
+option instead, which removes the bitrate constraint entirely and lets the
+source reach the encoder untouched. After a WAV/FLAC download the app prints
+the **actual** sample rate and bit depth of the files it produced.
+
+Worth knowing, so `Máx.` is not oversold: the quality ceiling is set by the
+**audio source**, not by this app. `spotdl` fetches audio from YouTube Music /
+SoundCloud — it has no Spotify audio provider — so what arrives is normally a
+lossy stream (typically Opus ~128 kbps at 48 kHz). A lossless container cannot
+recover detail the source never had, so `Máx.` will not raise the ceiling. For
+true hi-res audio you need a service that serves lossless natively (Qobuz,
+Tidal, Apple Music); Spotify's own lossless tier caps out at 24-bit / 44.1 kHz
+in any case.
+
 ---
 
 ## 📁 Project structure
@@ -197,7 +215,7 @@ SpotRR/
 | `default_output_folder` | Where files are saved | `""` (~/Downloads) |
 | `custom_logo_path` | Path to a custom logo image | `""` |
 | `preferred_format` | `mp3` / `wav` / `flac` | `mp3` |
-| `preferred_quality` | `128k` / `192k` / `320k` | `320k` |
+| `preferred_quality` | `128k` / `192k` / `320k` (MP3) · `max` (WAV, FLAC) | `320k` |
 
 ---
 
