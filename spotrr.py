@@ -1,5 +1,5 @@
 """
-SpotRR  v2.2.0
+SpotRR  v2.3.0
 Desktop application to get music using spotdl.
 
 Usage:
@@ -98,7 +98,7 @@ except (ImportError, RuntimeError, AttributeError):
 
 # ── App metadata ──────────────────────────────────────────────────────────────
 APP_NAME    = "SpotRR"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 APP_GITHUB  = "https://github.com/GITspotRR/SpotRR"
 
 # ── Audio quality choices ─────────────────────────────────────────────────────
