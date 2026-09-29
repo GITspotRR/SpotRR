@@ -125,6 +125,15 @@ DEFAULT_QUALITY: dict[str, str] = {
 # spotdl expects "disable" to mean "add no -b:a at all".
 SPOTDL_DISABLE_BITRATE = "disable"
 
+# Shown under the Quality control.  The options change with the format, so
+# without this the app opens on MP3 showing 128k/192k/320k and the "Máx."
+# option looks like it simply does not exist.
+QUALITY_HINTS: dict[str, str] = {
+    "mp3":  "MP3: objetivo de bitrate.  WAV / FLAC → «Máx.»",
+    "wav":  "Sin límite de bitrate — la calidad la marca la fuente",
+    "flac": "Sin límite de bitrate — la calidad la marca la fuente",
+}
+
 
 def _valid_quality(fmt: str, quality: str) -> str:
     """Return `quality` when it is valid for `fmt`, else that format's default."""
@@ -1014,19 +1023,19 @@ class SpotRRApp:
         row  = tk.Frame(card, bg=C["bg3"])
         row.pack(fill="x", padx=10, pady=(6, 5))
 
-        def _group(label: str) -> tk.Frame:
+        def _group(label: str) -> tuple[tk.Frame, tk.Frame]:
             g = tk.Frame(row, bg=C["bg3"])
             g.pack(side="left")
             _section_label(g, label, C["bg3"]).pack(anchor="w", pady=(0, 2))
             btns = tk.Frame(g, bg=C["bg3"])
             btns.pack()
-            return btns
+            return g, btns
 
         def _vsep():
             _divider(row, orient="v").pack(side="left", fill="y", padx=10)
 
         # Format
-        fmt_btns = _group("Format")
+        _fmt_group, fmt_btns = _group("Format")
         for lbl, val in (("MP3", "mp3"), ("WAV", "wav"), ("FLAC", "flac")):
             b = self._seg_btn(fmt_btns, lbl, lambda v=val: self._sel_fmt(v))
             b.pack(side="left")
@@ -1035,14 +1044,20 @@ class SpotRRApp:
         _vsep()
 
         # Quality — options depend on the format, so the buttons are rebuilt
-        # whenever the format changes (see _rebuild_quality).
-        self.quality_box = _group("Quality")
+        # whenever the format changes (see _rebuild_quality).  The hint line
+        # exists because the app starts on MP3, where "Máx." is correctly
+        # absent; without it the option looks missing rather than format-scoped.
+        self.quality_group, self.quality_box = _group("Quality")
+        self.quality_hint = tk.Label(
+            self.quality_group, text="", bg=C["bg3"], fg=C["t3"],
+            font=font.Font(family="Segoe UI", size=7), anchor="w")
+        self.quality_hint.pack(anchor="w")
         self._rebuild_quality(self.format_var.get())
 
         _vsep()
 
         # Threads
-        t_btns = _group("Threads")
+        _thr_group, t_btns = _group("Threads")
         for n in (2, 4, 8):
             label = "4 ★" if n == 4 else str(n)
             b = self._seg_btn(t_btns, label, lambda v=n: self._sel_batch(v))
@@ -1062,7 +1077,9 @@ class SpotRRApp:
         """Repopulate the Quality control with the options valid for `fmt`.
 
         MP3 offers real bitrates; WAV/FLAC offer only "Máx." because a bitrate
-        target is meaningless for a lossless container.
+        target is meaningless for a lossless container.  The hint line is
+        refreshed too, so the user can see that the options are format-scoped
+        instead of assuming the WAV/FLAC option is missing.
         """
         box = getattr(self, "quality_box", None)
         if box is not None and hasattr(box, "winfo_children"):
@@ -1073,6 +1090,10 @@ class SpotRRApp:
         choices = QUALITY_CHOICES.get(fmt) or QUALITY_CHOICES["mp3"]
         current = _valid_quality(fmt, self.quality_var.get())
         self.quality_var.set(current)
+
+        hint = getattr(self, "quality_hint", None)
+        if hint is not None:
+            hint.configure(text=QUALITY_HINTS.get(fmt, ""))
 
         if box is None:
             return

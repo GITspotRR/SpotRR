@@ -795,11 +795,25 @@ class TestFfmpegDetectionStrategy(unittest.TestCase):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestSingleInstance(unittest.TestCase):
+    """Single-instance lock via a bound TCP port.
+
+    The real port (_INSTANCE_PORT) is shared with a running copy of the app, so
+    these tests rebind it to an ephemeral one.  Without that, anyone with the
+    app open — i.e. every developer and every user checking the UI — gets two
+    spurious failures here that have nothing to do with the change under test.
+    """
+
     def setUp(self):
         spotrr._release_instance()
+        self._real_port = spotrr._INSTANCE_PORT
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        spotrr._INSTANCE_PORT = s.getsockname()[1]
+        s.close()
 
     def tearDown(self):
         spotrr._release_instance()
+        spotrr._INSTANCE_PORT = self._real_port
 
     def test_first_acquire_succeeds(self):
         self.assertTrue(spotrr._acquire_instance())
@@ -1737,6 +1751,38 @@ class TestRunSpotdlWiring(unittest.TestCase):
         # Otherwise a reused pre-warm client could carry a stale value from
         # spotdl's on-disk config.
         self.assertIn('"ffmpeg_args":     None', inspect.getsource(spotrr))
+
+
+class TestQualityHintIsVisible(unittest.TestCase):
+    """The "Máx." option must be discoverable.
+
+    The app starts on MP3, where a bitrate target is meaningful and "Máx." is
+    therefore correctly absent.  Without an on-screen hint the user opens the
+    app, sees 128k/192k/320k and concludes the WAV/FLAC option was never
+    added — which is exactly the confusion this guards against.
+    """
+
+    def test_hint_table_covers_every_format(self):
+        self.assertEqual(set(spotrr.QUALITY_HINTS), set(spotrr.QUALITY_CHOICES))
+
+    def test_mp3_hint_points_at_the_max_option(self):
+        # The MP3 hint is the only place a user learns "Máx." exists without
+        # switching formats first, so it has to name it.
+        self.assertIn("Máx.", spotrr.QUALITY_HINTS["mp3"])
+
+    def test_lossless_hints_do_not_promise_more_than_the_source(self):
+        for fmt in ("wav", "flac"):
+            hint = spotrr.QUALITY_HINTS[fmt]
+            self.assertIn("fuente", hint)
+            self.assertNotIn("ilimitad", hint.lower())
+
+    def test_hint_label_is_created_and_updated_per_format(self):
+        src = inspect.getsource(spotrr.SpotRRApp._rebuild_quality)
+        self.assertIn('"quality_hint"', src)
+        self.assertIn("QUALITY_HINTS.get(fmt", src)
+        build = inspect.getsource(spotrr.SpotRRApp._build_fqt)
+        self.assertIn("self.quality_hint", build)
+        self.assertIn("QUALITY_HINTS", inspect.getsource(spotrr))
 
 
 class TestSampleRateIsNeverCapped(unittest.TestCase):
