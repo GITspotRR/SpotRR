@@ -179,6 +179,25 @@ def _safe_threads(value) -> int:
     return n if n in (2, 4, 8) else 4
 
 
+def _partition_downloaded(results) -> tuple[list, list]:
+    """Split spotdl's results into (downloaded, missing) by whether the file exists.
+
+    spotdl returns the *intended* output path even when it skipped the download
+    — it does that when the file already exists, and also when it decides some
+    other file is a duplicate of the same song.  Trusting that path silently
+    turns a skip into a success: the summary would report 5/5 while the folder
+    held none of the requested format.  Anything that is not a real file on disk
+    counts as not downloaded and goes back into the retry queue instead.
+    """
+    done, missing = [], []
+    for song, path in results:
+        if path is not None and os.path.isfile(path):
+            done.append((song, path))
+        else:
+            missing.append(song)
+    return done, missing
+
+
 def _probe_audio_spec(path) -> "tuple[int, int | None] | None":
     """Return (sample_rate, bits_per_sample) for a WAV/FLAC file, or None.
 
@@ -579,7 +598,13 @@ class SpotRRApp:
                         # Must be present so a later refresh of the mutable keys
                         # does not leave a stale value from spotdl's config file.
                         "ffmpeg_args":     None,
-                        "audio_providers": ["youtube-music", "youtube", "soundcloud"],
+                        # A file of another format must never make this one count as already
+                        # downloaded: spotdl's "duplicate" check matches on the
+                        # filename stem and skips the download.  Declared here so
+                        # an edit to ~/.config/spotdl/config.json cannot silently
+                        # start skipping WAV because an MP3 sits in the folder.
+                        "scan_for_songs":  False,
+                        "detect_formats":  None,
                         "simple_tui":      True,
                         "print_errors":    False,
                         "log_format":      None,
@@ -2384,6 +2409,13 @@ class SpotRRApp:
             # for the container (-codec:a flac / pcm_s16le).  Overriding the
             # sample format here would only pad a lossy source with empty bits.
             "ffmpeg_args":     None,
+            # A file of another format must never make this one count as already
+            # downloaded: spotdl's duplicate check matches on the filename stem
+            # and would skip the download.  Declared here so an edit to
+            # ~/.config/spotdl/config.json cannot silently start skipping a WAV
+            # just because an MP3 with the same name is in the folder.
+            "scan_for_songs":  False,
+            "detect_formats":  None,
             "audio_providers": list(_providers),
             "simple_tui":      True,
             "print_errors":    False,
@@ -2414,7 +2446,8 @@ class SpotRRApp:
                 self._spotdl_init_creds = creds_key
 
             # Always refresh per-download settings on the cached client.
-            for k in ("output", "format", "bitrate", "threads", "ffmpeg_args"):
+            for k in ("output", "format", "bitrate", "threads", "ffmpeg_args",
+                      "scan_for_songs", "detect_formats"):
                 client.downloader.settings[k] = settings[k]
             client.downloader.settings["audio_providers"] = settings["audio_providers"]
 
@@ -2571,9 +2604,10 @@ class SpotRRApp:
                     break
                 batch   = all_songs[i:i + batch_sz]
                 results = client.download_songs(batch)
-                self._dl_ok += sum(1 for _, p in results if p is not None)
-                pending += [song for song, p in results if p is None]
-                self._record_specs(results)
+                done, missing = _partition_downloaded(results)
+                self._dl_ok += len(done)
+                pending += missing
+                self._record_specs(done)
 
             # ── Retries (up to 2) ─────────────────────────────────────────────
             _verbose[0] = False  # suppress per-track "Not found" during retries
@@ -2591,9 +2625,10 @@ class SpotRRApp:
                 if not _check_pause_stop():
                     break
                 results      = client.download_songs(pending)
-                self._dl_ok += sum(1 for _, p in results if p is not None)
-                pending      = [song for song, p in results if p is None]
-                self._record_specs(results)
+                done, missing = _partition_downloaded(results)
+                self._dl_ok += len(done)
+                pending      = missing
+                self._record_specs(done)
 
             # ── Last resort: disable result-quality filter ────────────────────
             if pending and _check_pause_stop():
@@ -2608,9 +2643,10 @@ class SpotRRApp:
                         toggled.append(provider)
                 try:
                     results      = client.download_songs(pending)
-                    self._dl_ok += sum(1 for _, p in results if p is not None)
-                    pending      = [song for song, p in results if p is None]
-                    self._record_specs(results)
+                    done, missing = _partition_downloaded(results)
+                    self._dl_ok += len(done)
+                    pending      = missing
+                    self._record_specs(done)
                 finally:
                     for provider in toggled:
                         provider.filter_results = True

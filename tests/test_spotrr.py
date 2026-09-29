@@ -1749,8 +1749,10 @@ class TestRunSpotdlWiring(unittest.TestCase):
 
     def test_specs_recorded_after_every_download_batch(self):
         # Three call sites: first pass, retry pass, last resort.  Missing any of
-        # them makes the "Actual output" line under-report the batch.
-        self.assertEqual(self.source.count("self._record_specs(results)"), 3)
+        # them makes the "Actual output" line under-report the batch.  They are
+        # fed `done` rather than the raw results so a skipped track (spotdl
+        # returns the intended path without writing it) is not probed.
+        self.assertEqual(self.source.count("self._record_specs(done)"), 3)
 
     def test_ffmpeg_args_refreshed_on_cached_client(self):
         import re
@@ -1806,6 +1808,91 @@ class TestPrivatePlaylistFallback(unittest.TestCase):
     def test_generic_error_still_covers_the_non_denied_case(self):
         src = self._start_dl_source()
         self.assertIn("No songs found for this URL", src)
+
+
+class TestCrossFormatSkip(unittest.TestCase):
+    """A file of one format must never suppress the download of another.
+
+    Reported: with an MP3 already in the folder, requesting WAV skipped every
+    track "as if it were the same file".  Reproduced the mechanism against the
+    real spotdl Downloader options: with detect_formats set to a list and
+    scan_for_songs off, spotdl matches on the filename *stem* and treats a
+    different-extension file as a duplicate.
+    """
+
+    def _folder_with_mp3(self):
+        import tempfile
+        from pathlib import Path
+        d = tempfile.mkdtemp(prefix="xskip_")
+        Path(d, "Artist - Title.mp3").write_bytes(b"x" * 100)
+        self.addCleanup(shutil.rmtree, d, True)
+        return d
+
+    # ── 1. the app must not depend on the user's on-disk spotdl config ──
+
+    def test_skip_settings_declared_in_both_client_configs(self):
+        src = inspect.getsource(spotrr)
+        self.assertEqual(src.count('"scan_for_songs":  False'), 2,
+                         "must be declared in the pre-warm and per-download configs")
+        self.assertEqual(src.count('"detect_formats":  None'), 2)
+
+    def test_skip_settings_refreshed_on_cached_client(self):
+        import re
+        src = inspect.getsource(spotrr.SpotRRApp._run_spotdl)
+        m = re.search(r"for k in \(([^)]*)\):", src)
+        self.assertIsNotNone(m)
+        for key in ("scan_for_songs", "detect_formats"):
+            self.assertIn(key, m.group(1),
+                          f"{key} not refreshed — a cached client keeps a stale value")
+
+    # ── 2. a skip must never be counted as a success ──
+
+    def test_existing_file_of_same_format_counts_as_done(self):
+        import tempfile
+        d = tempfile.mkdtemp(prefix="xskip2_")
+        self.addCleanup(shutil.rmtree, d, True)
+        p = os.path.join(d, "a.wav")
+        open(p, "wb").write(b"x")
+        done, missing = spotrr._partition_downloaded([("s", p)])
+        self.assertEqual(len(done), 1)
+        self.assertEqual(missing, [])
+
+    def test_nonexistent_path_is_treated_as_not_downloaded(self):
+        """spotdl hands back the intended path even when it skipped.
+
+        That is the real defect: the old code counted any non-None path as a
+        success, so the summary reported 5/5 for a folder with no WAV in it.
+        """
+        done, missing = spotrr._partition_downloaded(
+            [("s", "/nonexistent/Artist - Title.wav")])
+        self.assertEqual(done, [])
+        self.assertEqual(missing, ["s"])
+
+    def test_none_path_is_not_downloaded(self):
+        done, missing = spotrr._partition_downloaded([("s", None)])
+        self.assertEqual(done, [])
+        self.assertEqual(missing, ["s"])
+
+    def test_mixed_results_split_correctly(self):
+        import tempfile
+        d = tempfile.mkdtemp(prefix="xskip3_")
+        self.addCleanup(shutil.rmtree, d, True)
+        real = os.path.join(d, "a.wav"); open(real, "wb").write(b"x")
+        results = [("s1", real), ("s2", None), ("s3", os.path.join(d, "gone.wav"))]
+        done, missing = spotrr._partition_downloaded(results)
+        self.assertEqual([s for s, _ in done], ["s1"])
+        self.assertEqual(missing, ["s2", "s3"])
+
+    def test_all_three_call_sites_verify_the_file(self):
+        # first pass, retry, last resort — any one left trusting the raw path
+        # reopens the silent-skip hole.
+        src = inspect.getsource(spotrr.SpotRRApp._run_spotdl)
+        self.assertEqual(src.count("_partition_downloaded(results)"), 3)
+        self.assertNotIn("sum(1 for _, p in results if p is not None)", src)
+
+    def test_specs_recorded_only_from_real_files(self):
+        src = inspect.getsource(spotrr.SpotRRApp._run_spotdl)
+        self.assertEqual(src.count("self._record_specs(done)"), 3)
 
 
 class TestSettingsCoercion(unittest.TestCase):
