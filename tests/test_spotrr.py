@@ -9,6 +9,7 @@ import os
 import json
 import logging
 import inspect
+from pathlib import Path
 import importlib.util
 import shutil
 import socket
@@ -1810,6 +1811,31 @@ class TestPrivatePlaylistFallback(unittest.TestCase):
         self.assertIn("No songs found for this URL", src)
 
 
+class TestCachedClientTracksFormatChanges(unittest.TestCase):
+    """A reused spotdl client must not keep the previous format.
+
+    The client is cached across downloads, but Downloader.__init__ derives
+    scan_formats once and spotdl never recomputes it.  So the WAV download
+    that followed an MP3 download asked spotdl to look for a ".mp3" that
+    already existed, and every track was skipped as a duplicate.
+    """
+
+    def test_real_code_refreshes_scan_formats(self):
+        src = inspect.getsource(spotrr.SpotRRApp._run_spotdl)
+        self.assertIn("scan_formats", src,
+                      "_run_spotdl must refresh scan_formats on the cached client")
+
+    def test_spotdl_never_recomputes_it(self):
+        # The whole bug rests on this, so pin it: if a future spotdl release
+        # starts recomputing scan_formats, the workaround can be dropped.
+        # spotdl is mocked in this file, so read the real source off disk.
+        from importlib.metadata import distribution
+        src = (Path(distribution("spotdl").locate_file("spotdl"))
+               / "download" / "downloader.py").read_text(encoding="utf-8")
+        self.assertEqual(src.count("self.scan_formats ="), 1,
+                         "spotdl now recomputes scan_formats; drop the workaround")
+
+
 class TestVersionIsVisibleInTheLog(unittest.TestCase):
     """The batch header must carry the version.
 
@@ -1846,7 +1872,6 @@ class TestCrossFormatSkip(unittest.TestCase):
 
     def _folder_with_mp3(self):
         import tempfile
-        from pathlib import Path
         d = tempfile.mkdtemp(prefix="xskip_")
         Path(d, "Artist - Title.mp3").write_bytes(b"x" * 100)
         self.addCleanup(shutil.rmtree, d, True)

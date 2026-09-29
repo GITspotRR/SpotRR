@@ -2462,6 +2462,16 @@ class SpotRRApp:
             # threads in the UI had no effect on actual concurrency.
             client.downloader.semaphore = asyncio.Semaphore(settings["threads"])
 
+            # scan_formats is derived in Downloader.__init__ and never recomputed,
+            # exactly like the semaphore above. The client is cached across
+            # downloads, so after an MP3 download the WAV download asked spotdl
+            # to look for a ".mp3" that already existed and skipped every track
+            # as a duplicate. Recompute it to match the current format.
+            client.downloader.scan_formats = (
+                client.downloader.settings["detect_formats"]
+                or [client.downloader.settings["format"]]
+            )
+
         # ── Log handler ────────────────────────────────────────────────────────
         # Tracks completed count for the progress bar.
         # _verbose[0] = True during first pass (show not-found inline),
