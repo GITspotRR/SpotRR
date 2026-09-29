@@ -1753,6 +1753,43 @@ class TestRunSpotdlWiring(unittest.TestCase):
         self.assertIn('"ffmpeg_args":     None', inspect.getsource(spotrr))
 
 
+class TestSettingsCoercion(unittest.TestCase):
+    """A malformed settings.json must never take the app down at startup.
+
+    _load_settings validated the format and quality keys but handed
+    preferred_threads straight to int().  A hand-edited or half-written file —
+    "preferred_threads": null, a string, a list — raised out of __init__, so the
+    app died on launch with a traceback and the only recovery was deleting
+    settings.json by hand.  Reachable for anyone who edits the file, or whose
+    write was interrupted mid-download.
+    """
+
+    HOSTILE = ["abc", None, [], {}, "", "4.5", [2], True, float("nan"),
+               "0x4", "eight", "4 threads", object()]
+
+    def test_hostile_values_fall_back_to_4(self):
+        for bad in self.HOSTILE:
+            with self.subTest(value=bad):
+                self.assertEqual(spotrr._safe_threads(bad), 4)
+
+    def test_valid_values_survive(self):
+        # int() strips whitespace and accepts bytes, so these are all valid.
+        for good in (2, 4, 8, "2", "4", "8", " 8 ", "\t4\n", 8.0, "08", b"4"):
+            with self.subTest(value=good):
+                self.assertEqual(spotrr._safe_threads(good), int(good))
+
+    def test_out_of_range_values_fall_back(self):
+        for bad in (0, 1, 3, 5, 16, 99, -4, -2):
+            with self.subTest(value=bad):
+                self.assertEqual(spotrr._safe_threads(bad), 4)
+
+    def test_load_settings_uses_the_helper(self):
+        self.assertIn("_safe_threads(", inspect.getsource(spotrr.SpotRRApp._load_settings))
+
+    def test_default_when_key_absent(self):
+        self.assertEqual(spotrr._safe_threads(4), 4)
+
+
 class TestQualityHintIsVisible(unittest.TestCase):
     """The "Máx." option must be discoverable.
 

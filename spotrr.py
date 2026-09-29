@@ -164,6 +164,21 @@ def _spotdl_bitrate(fmt: str, quality: str) -> str:
     return SPOTDL_DISABLE_BITRATE if quality == MAX_QUALITY else quality
 
 
+def _safe_threads(value) -> int:
+    """Coerce a saved thread count to one of the offered values.
+
+    A hand-edited or half-written settings.json can hold anything here — a
+    string, null, a list — and int() would raise straight out of __init__,
+    taking the app down on launch with the only recovery being to delete the
+    file by hand.  Anything unrecognised falls back to 4.
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return 4
+    return n if n in (2, 4, 8) else 4
+
+
 def _probe_audio_spec(path) -> "tuple[int, int | None] | None":
     """Return (sample_rate, bits_per_sample) for a WAV/FLAC file, or None.
 
@@ -630,9 +645,11 @@ class SpotRRApp:
         self.format_var.set(fmt)
         self.quality_var.set(quality)
 
-        saved_threads = int(s.get("preferred_threads", 4))
-        if saved_threads not in (2, 4, 8):
-            saved_threads = 4
+        # Coerce rather than trust: a hand-edited or half-written settings.json
+        # can hold a non-numeric thread count, and int() would raise and take
+        # the whole app down at startup with no way to recover short of
+        # deleting the file by hand.
+        saved_threads = _safe_threads(s.get("preferred_threads", 4))
         self.batch_size = saved_threads
         folder = s.get("default_output_folder", "")
         if folder:
