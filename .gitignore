@@ -40,3 +40,4 @@ assets/ffmpeg.exe
 
 # Spotify auth token cache
 .cache
+.spotipy/

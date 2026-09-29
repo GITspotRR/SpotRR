@@ -10,6 +10,7 @@ Requirements:
 """
 
 import asyncio
+import hashlib
 import importlib
 import io
 import json
@@ -22,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.parse
 import warnings
 import webbrowser
@@ -67,6 +69,7 @@ import requests
 
 try:
     import spotipy
+    from spotipy.cache_handler import CacheFileHandler
     from spotipy.oauth2 import SpotifyClientCredentials
     SPOTIPY_AVAILABLE = True
 except ImportError:
@@ -185,8 +188,58 @@ class _RateLimitHandler:
 _rl = _RateLimitHandler()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Console warning policy
+# ─────────────────────────────────────────────────────────────────────────────
+# The on-screen terminal is the user-facing surface, so it has to stay clean.
+# Warnings that are pure implementation detail (FFmpeg probing, logo loading,
+# settings writes, API/spotdl/yt-dlp internals) are routed to app.log instead
+# of the widget.  Only warnings the user can actually act on stay visible —
+# matched by a marker in the message text so the call sites keep their plain
+# "warning" kind.
+_VISIBLE_WARNINGS = (
+    "No API credentials",                                   # Client ID/Secret missing
+    "private or collaborative",                             # playlist not shareable
+    "Please paste a URL",
+    "Cannot remove the item currently being downloaded",
+    "Stop the current download before clearing the queue",
+    "Cannot move ahead of the active download",
+    "Cannot move the active download",
+    "tracks downloaded",                                    # partial-failure summary
+)
+
+
+def _is_visible_warning(msg: str) -> bool:
+    """True when a warning is meant for the user and must reach the terminal."""
+    return any(marker in msg for marker in _VISIBLE_WARNINGS)
+
+
+def _invalidate_spotify_token(sp_client) -> bool:
+    """Drop the cached access token so the next request fetches a fresh one.
+
+    Returns True when a token was actually discarded, i.e. a retry has a
+    chance of succeeding.  Spotipy never re-authenticates on its own, so a
+    token that Spotify has revoked (or that was issued to a *different* app
+    after the user changed their credentials) would otherwise keep failing
+    with 401 until it happens to expire.
+    """
+    try:
+        manager = sp_client.auth_manager
+        cache   = manager.cache_handler
+    except Exception:
+        return False
+    if not hasattr(cache, "save_token_to_cache"):
+        return False
+    try:
+        cache.save_token_to_cache(None)
+        return True
+    except Exception:
+        return False
+
+
 def _spotify_call(fn, *args, **kwargs):
-    """Wrap any callable with automatic 429 retry (max 3 attempts)."""
+    """Wrap any callable with automatic 429 backoff and 401 re-auth (max 3 attempts)."""
+    owner = getattr(fn, "__self__", None)   # the spotipy client behind a bound method
     for attempt in range(3):
         try:
             _rl.wait()
@@ -198,6 +251,13 @@ def _spotify_call(fn, *args, **kwargs):
                 if attempt == 2:
                     raise
                 time.sleep(_rl._retry_after)
+            elif "401" in msg or "invalid access token" in msg:
+                # Stale/revoked bearer token: throw it away and try once more.
+                # A 401 that survives the refresh means the resource needs user
+                # auth (private playlist) — fall through and raise so the
+                # caller can use its normal fallback.
+                if attempt == 2 or not _invalidate_spotify_token(owner):
+                    raise
             else:
                 raise
     raise RuntimeError("Max retries reached")
@@ -519,6 +579,9 @@ class SpotRRApp:
 
         return None, None
 
+    def _spotipy_cache_dir(self) -> str:
+        return os.path.join(self._base, ".spotipy")
+
     def _init_spotify_client(self) -> None:
         if not SPOTIPY_AVAILABLE:
             self._log("ℹ️  spotipy not available — queue labels use URL patterns", "info")
@@ -528,13 +591,25 @@ class SpotRRApp:
             self._log("⚠️  No API credentials — use 🔑 Client ID / Secret buttons", "warning")
             return
         try:
+            # Cache the token under a file named after the client_id: spotipy's
+            # default ".cache" holds no owner information, so swapping
+            # credentials would keep serving the previous app's token (and 401)
+            # until it expired.  Keying by client_id invalidates it instantly.
+            cache_dir = self._spotipy_cache_dir()
+            os.makedirs(cache_dir, exist_ok=True)
+            token_file = os.path.join(
+                cache_dir, hashlib.sha256(cid.strip().encode("utf-8")).hexdigest()[:16])
+
             self.sp = spotipy.Spotify(
                 client_credentials_manager=SpotifyClientCredentials(
-                    client_id=cid, client_secret=cs))
+                    client_id=cid, client_secret=cs,
+                    cache_handler=CacheFileHandler(cache_path=token_file)))
             self._log("✅  API client ready", "success")
         except Exception as exc:
             self.sp = None
-            self._log(f"❌  API client error: {exc}", "error")
+            self._log("❌  Couldn't connect to Spotify — check your Client ID and Secret", "error")
+            logging.getLogger("spotrr").error("spotipy client init failed: %s", exc,
+                                              exc_info=True)
 
     # ── Dependency check ──────────────────────────────────────────────────────
 
@@ -1100,19 +1175,34 @@ class SpotRRApp:
         self.console.configure(state="disabled")
 
     def _log(self, msg: str, kind: str = "info") -> None:
-        """Thread-safe console output. Call from any thread."""
+        """Thread-safe console output. Call from any thread.
+
+        Internal warnings are not shown: they are written to app.log instead so
+        the on-screen terminal stays clean.  See _VISIBLE_WARNINGS for the few
+        warnings the user can act on, which still reach the widget.
+        """
         ts = datetime.now().strftime("%H:%M:%S")
+
+        def _tag() -> str:
+            if msg.startswith("✅"):    return "success"
+            if msg.startswith("❌"):    return "error"
+            if msg.startswith("⚠️"):    return "warning"
+            if msg.startswith("🎵"):    return "song"
+            if msg.startswith("📂"):    return "folder"
+            return kind
+
+        if _tag() == "warning" and not _is_visible_warning(msg):
+            try:
+                logging.getLogger("spotrr").warning(msg)
+            except Exception:
+                pass
+            return
 
         def _do() -> None:
             self.console.configure(state="normal")
 
             # Determine tag from emoji prefix or kind argument
-            tag = kind
-            if msg.startswith("✅"):    tag = "success"
-            elif msg.startswith("❌"):  tag = "error"
-            elif msg.startswith("⚠️"):  tag = "warning"
-            elif msg.startswith("🎵"):  tag = "song"
-            elif msg.startswith("📂"):  tag = "folder"
+            tag = _tag()
 
             # Separator lines: no timestamp, different colour
             is_sep = msg.strip("─ =\n") == ""
@@ -1288,6 +1378,7 @@ class SpotRRApp:
             s["client_id"] = val.strip()
             self._write_cfg(s)
             self._invalidate_spotdl_client()
+            self._clear_spotipy_tokens()
             self._init_spotify_client()
             self._log("✅  Client ID saved", "success")
 
@@ -1300,8 +1391,22 @@ class SpotRRApp:
             s["client_secret"] = val.strip()
             self._write_cfg(s)
             self._invalidate_spotdl_client()
+            self._clear_spotipy_tokens()
             self._init_spotify_client()
             self._log("✅  Client Secret saved", "success")
+
+    def _clear_spotipy_tokens(self) -> None:
+        """Delete every cached bearer token issued to the previous credentials."""
+        cache_dir = self._spotipy_cache_dir()
+        try:
+            names = os.listdir(cache_dir)
+        except OSError:
+            return
+        for name in names:
+            try:
+                os.remove(os.path.join(cache_dir, name))
+            except OSError:
+                pass
 
     def _invalidate_spotdl_client(self) -> None:
         """Discard the cached client AND reset the SpotifyClient singleton so
@@ -1732,9 +1837,9 @@ class SpotRRApp:
                     self._set_status("Failed", C["red"])
                 self._set_progress(0, "")
         except Exception as exc:
-            self._log(f"❌  Unexpected error: {exc}", "error")
-            import traceback
-            self._log(traceback.format_exc(), "error")
+            self._log("❌  Something went wrong with this download", "error")
+            logging.getLogger("spotrr").error(
+                "download failed: %s\n%s", exc, traceback.format_exc())
             self._set_status("Error", C["red"])
             self._set_progress(0, "")
         finally:
@@ -1866,26 +1971,31 @@ class SpotRRApp:
 
         return songs
 
-    def _resolve_spotify_songs(self, url: str) -> list:
+    def _resolve_spotify_songs(self, url: str) -> tuple[list, bool]:
         """Fetch all songs from a Spotify playlist or album using parallel API pages.
 
         Bypasses spotdl's sequential pagination (which makes one HTTP call per page
         of 100 tracks) by fetching all pages concurrently with our own spotipy client.
         Falls back to an empty list on any error so the caller can use client.search().
+
+        Returns (songs, access_denied).  access_denied is True when Spotify
+        refused the request because the playlist/album needs a signed-in user —
+        i.e. it is private or collaborative — which the caller turns into a
+        user-facing hint rather than a raw HTTP error.
         """
         import concurrent.futures
 
         try:
             from spotdl.types.song import Song as _Song
         except ImportError:
-            return []
+            return [], False
 
         if not self.sp:
-            return []
+            return [], False
 
         m = re.search(r"spotify\.com/(playlist|album)/([A-Za-z0-9]+)", url)
         if not m:
-            return []
+            return [], False
         kind, item_id = m.group(1), m.group(2)
 
         all_items: list = []
@@ -1902,7 +2012,7 @@ class SpotRRApp:
                 resp = _spotify_call(self.sp.playlist_items, item_id,
                                      limit=100, fields=_fields)
                 if resp is None:
-                    return []
+                    return [], False
                 total     = resp.get("total", 0)
                 all_items = list(resp.get("items", []))
                 offsets   = list(range(100, total, 100))
@@ -1924,7 +2034,7 @@ class SpotRRApp:
             else:  # album
                 album_data = _spotify_call(self.sp.album, item_id)
                 if album_data is None:
-                    return []
+                    return [], False
                 album_meta = {
                     "id":           album_data.get("id"),
                     "name":         album_data.get("name"),
@@ -1954,9 +2064,13 @@ class SpotRRApp:
                             all_items.extend(page)
 
         except Exception as exc:
-            if "403" not in str(exc):
-                self._log(f"⚠️  Spotify fast-fetch failed, using fallback: {exc}", "warning")
-            return []
+            # 401/403 means Spotify needs a signed-in user to read this item —
+            # almost always a private or collaborative playlist.  Surface that
+            # to the caller; everything else is a technical detail.
+            access_denied = "401" in str(exc) or "403" in str(exc)
+            logging.getLogger("spotrr").debug(
+                "Spotify fast-fetch failed (access_denied=%s): %s", access_denied, exc)
+            return [], access_denied
 
         songs = []
         for track_no, item in enumerate(all_items):
@@ -2023,7 +2137,7 @@ class SpotRRApp:
             except Exception:
                 pass
 
-        return songs
+        return songs, False
 
     def _run_spotdl(self, url: str, folder: str, fmt: str, quality: str) -> bool:
         """Download via spotdl's Python API (in-process, batched for pause/stop support)."""
@@ -2180,8 +2294,14 @@ class SpotRRApp:
             if platform == "soundcloud":
                 songs = self._resolve_soundcloud_songs(url)
             elif platform == "spotify" and kind in ("playlist", "album") and self.sp:
-                songs = self._resolve_spotify_songs(url)
+                songs, access_denied = self._resolve_spotify_songs(url)
                 if not songs:
+                    if access_denied:
+                        what = "album" if kind == "album" else "playlist"
+                        self._log(
+                            f"⚠️  Spotify wouldn't share this {what} — it may be private or collaborative.\n"
+                            f"     Looking it up by search instead, which can be slower.",
+                            "warning")
                     songs = client.search([url])
             else:
                 songs = client.search([url])
@@ -2269,9 +2389,9 @@ class SpotRRApp:
             return True
 
         except Exception as exc:
-            self._log(f"❌  spotdl error: {exc}", "error")
-            import traceback as _tb
-            self._log(_tb.format_exc(), "error")
+            self._log("❌  The download could not be completed", "error")
+            logging.getLogger("spotrr").error(
+                "spotdl error: %s\n%s", exc, traceback.format_exc())
             return False
 
         finally:
@@ -2305,7 +2425,9 @@ class SpotRRApp:
                 else:
                     self._log("✅  spotdl is up to date", "success")
             except Exception as exc:
-                self._log(f"❌  Update error: {exc}", "error")
+                self._log("❌  Couldn't update spotdl — check your internet connection", "error")
+                logging.getLogger("spotrr").error("spotdl update failed: %s", exc,
+                                                  exc_info=True)
 
         threading.Thread(target=_work, daemon=True).start()
 
@@ -2366,7 +2488,9 @@ class SpotRRApp:
             else:
                 self._create_shortcut_unix(base, logo, script)
         except Exception as exc:
-            self._log(f"❌  Shortcut error: {exc}", "error")
+            self._log("❌  Couldn't create the shortcut on your desktop", "error")
+            logging.getLogger("spotrr").error("shortcut creation failed: %s", exc,
+                                              exc_info=True)
 
     @staticmethod
     def _windows_desktop() -> str:
@@ -3104,9 +3228,8 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        import traceback as _tb
         logging.exception("Fatal error on startup")
-        err_text = _tb.format_exc()
+        err_text = traceback.format_exc()
         # Write startup_error.log so setup.bat can detect and show it
         try:
             err_path = os.path.join(

@@ -7,6 +7,8 @@ mocked at import time so no display and no internet are required.
 import sys
 import os
 import json
+import logging
+import inspect
 import shutil
 import socket
 import tempfile
@@ -840,6 +842,385 @@ class TestRateLimitHandler(unittest.TestCase):
         self.rl._last = 0.0
         self.rl.wait()
         self.assertEqual(self.rl._retry_after, 0.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Console warning policy
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestWarningPolicy(unittest.TestCase):
+    """Internal warnings must never reach the on-screen terminal."""
+
+    def _app(self):
+        app = MagicMock(spec=spotrr.SpotRRApp)
+        app.console = MagicMock()
+        app.root = MagicMock()
+        app._log = spotrr.SpotRRApp._log.__get__(app, spotrr.SpotRRApp)
+        return app
+
+    def _shown(self, msg, kind="warning"):
+        app = self._app()
+        before = app.console.insert.call_count
+        app._log(msg, kind)
+        return app.console.insert.call_count - before
+
+    # ── Kept visible ──────────────────────────────────────────────────────
+    def test_client_credentials_warning_is_visible(self):
+        self.assertTrue(spotrr._is_visible_warning(
+            "⚠️  No API credentials — use 🔑 Client ID / Secret buttons"))
+
+    def test_empty_url_warning_is_visible(self):
+        self.assertTrue(spotrr._is_visible_warning(
+            "⚠️  Please paste a URL (Spotify, YouTube or SoundCloud)"))
+
+    def test_queue_errors_are_visible(self):
+        for msg in ("⚠️  Cannot remove the item currently being downloaded — stop it first",
+                    "⚠️  Stop the current download before clearing the queue",
+                    "⚠️  Cannot move ahead of the active download",
+                    "⚠️  Cannot move the active download"):
+            self.assertTrue(spotrr._is_visible_warning(msg), msg)
+
+    def test_partial_failure_summary_is_visible(self):
+        self.assertTrue(spotrr._is_visible_warning(
+            "⚠️  3/10 tracks downloaded · 7 failed\n     Try again later."))
+
+    # ── Suppressed ────────────────────────────────────────────────────────
+    def test_fast_fetch_401_warning_is_hidden(self):
+        self.assertFalse(spotrr._is_visible_warning(
+            "⚠️  Spotify fast-fetch failed, using fallback: http status: 401, "
+            "code: -1 - https://api.spotify.com/v1/playlists/x/items:\n "
+            "Valid user authentication required, reason: None"))
+
+    def test_technical_warnings_are_hidden(self):
+        for msg in ("⚠️  FFmpeg not found — WAV/FLAC conversion will fail.",
+                    "⚠️  Logo load error: boom",
+                    "⚠️  Settings save error: disk full",
+                    "⚠️  API error: http status: 401",
+                    "⚠️  yt-dlp update failed: timeout",
+                    "⚠️  Not found: Some Song"):
+            self.assertFalse(spotrr._is_visible_warning(msg), msg)
+
+    def test_legacy_indented_warning_is_hidden(self):
+        self.assertFalse(spotrr._is_visible_warning(
+            "     ⚠️  spotdl: command failed"))
+
+    def test_technical_warning_never_reaches_console(self):
+        self.assertEqual(self._shown("⚠️  Logo load error: boom"), 0)
+
+    def test_hidden_warning_goes_to_the_log_file(self):
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        logger = logging.getLogger("spotrr")
+        handler = _Capture()
+        logger.addHandler(handler)
+        try:
+            self._shown("⚠️  API error: http status: 401")
+        finally:
+            logger.removeHandler(handler)
+        self.assertEqual(len(records), 1)
+        self.assertIn("401", records[0].getMessage())
+
+    def test_visible_warning_still_reaches_console(self):
+        self.assertGreater(
+            self._shown("⚠️  No API credentials — use 🔑 Client ID / Secret buttons"), 0)
+
+    def test_non_warning_kinds_are_never_suppressed(self):
+        for kind, msg in (("success", "✅  API client ready"),
+                          ("error", "❌  No songs found for this URL"),
+                          ("info", "ℹ️   Found 42 songs"),
+                          ("song", "🎵  Rick Astley"),
+                          ("folder", "📂  /home/user/Music")):
+            self.assertGreater(self._shown(msg, kind), 0, msg)
+
+    def test_warning_kind_without_emoji_is_still_suppressed(self):
+        self.assertEqual(self._shown("a bare warning", "warning"), 0)
+
+    def test_no_error_message_interpolates_a_raw_exception(self):
+        """Errors are never suppressed, so they must stay user-readable."""
+        import re
+        source = inspect.getsource(spotrr)
+        offenders = re.findall(r'_log\(\s*f?["\'][^"\']*❌[^"\']*\{(?:exc|e)\}', source)
+        self.assertEqual(offenders, [],
+                         f"raw exception leaked into an error message: {offenders}")
+
+    def test_no_console_message_dumps_a_traceback(self):
+        import re
+        source = inspect.getsource(spotrr)
+        offenders = re.findall(r'_log\([^)]*format_exc', source)
+        self.assertEqual(offenders, [],
+                         f"traceback printed to the console: {offenders}")
+
+    def test_private_playlist_hint_is_visible(self):
+        self.assertTrue(spotrr._is_visible_warning(
+            "⚠️  Spotify wouldn't share this playlist — it may be private or "
+            "collaborative.\n     Looking it up by search instead."))
+
+    def test_no_user_visible_message_leaks_internals(self):
+        """Nothing shown to the user may mention implementation jargon."""
+        shown = [
+            "⚠️  Spotify wouldn't share this playlist — it may be private or collaborative.\n"
+            "     Looking it up by search instead, which can be slower.",
+            "⚠️  No API credentials — use 🔑 Client ID / Secret buttons",
+            "⚠️  Please paste a URL (Spotify, YouTube or SoundCloud)",
+            "❌  The download could not be completed",
+            "❌  Something went wrong with this download",
+        ]
+        banned = ("fast-fetch", "http status", "spotipy", "Traceback", "code: -1",
+                  "api.spotify.com", "spotdl", "exception")
+        for msg in shown:
+            for word in banned:
+                self.assertNotIn(word.lower(), msg.lower(), f"{word!r} leaked into {msg!r}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fast-fetch failure reporting (must be user-facing, not developer-facing)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _FakeSpotify:
+    """A real class so its methods are genuine bound methods — spotrr relies on
+    ``__self__`` to reach the auth manager, which MagicMock does not provide."""
+
+    def __init__(self, behaviour):
+        self.saved = []
+        self.calls = []
+        self._behaviour = behaviour
+        self.auth_manager = MagicMock()
+        self.auth_manager.cache_handler.save_token_to_cache.side_effect = self.saved.append
+
+    def playlist_items(self, *_a, **_k):
+        self.calls.append(1)
+        return self._behaviour(len(self.calls))
+
+    album = playlist_items
+    album_tracks = playlist_items
+
+
+class TestFastFetchFailureReporting(unittest.TestCase):
+    URL = "https://open.spotify.com/playlist/7kXpGUgebdDQRSRC8pFrCf"
+
+    def setUp(self):
+        self._wait = spotrr._rl.wait
+        spotrr._rl.wait = lambda: None
+        self.app = _bind("_resolve_spotify_songs", {"sp": None, "_log": MagicMock()})
+        # spotdl is mocked suite-wide; the resolver needs the Song type to exist
+        # before it ever talks to the API, so register a stand-in submodule.
+        self._had_song_mod = "spotdl.types.song" in sys.modules
+        sys.modules["spotdl.types.song"] = MagicMock()
+        logger = logging.getLogger("spotrr")
+        self._handler = logging.NullHandler()
+        logger.addHandler(self._handler)
+        self._old_level = logger.level
+        logger.setLevel(logging.DEBUG)
+
+    def tearDown(self):
+        spotrr._rl.wait = self._wait
+        if not self._had_song_mod:
+            sys.modules.pop("spotdl.types.song", None)
+        logger = logging.getLogger("spotrr")
+        logger.removeHandler(self._handler)
+        logger.setLevel(self._old_level)
+
+    @staticmethod
+    def _always_fail(message):
+        def behaviour(_n):
+            raise Exception(message)
+        return behaviour
+
+    def test_returns_songs_and_access_denied_flag(self):
+        self.app.sp = _FakeSpotify(lambda _n: {"total": 0, "items": []})
+        songs, denied = self.app._resolve_spotify_songs(self.URL)
+        self.assertEqual(songs, [])
+        self.assertFalse(denied)
+
+    def test_401_is_reported_as_access_denied(self):
+        self.app.sp = _FakeSpotify(self._always_fail(
+            "http status: 401, code: -1 - https://api.spotify.com/v1/"
+            "playlists/x/items:\n Valid user authentication required, reason: None"))
+        songs, denied = self.app._resolve_spotify_songs(self.URL)
+        self.assertEqual(songs, [])
+        self.assertTrue(denied)
+
+    def test_403_is_reported_as_access_denied(self):
+        self.app.sp = _FakeSpotify(self._always_fail(
+            "http status: 403, code: -1 - forbidden"))
+        _songs, denied = self.app._resolve_spotify_songs(self.URL)
+        self.assertTrue(denied)
+
+    def test_other_errors_are_not_reported_as_access_denied(self):
+        self.app.sp = _FakeSpotify(self._always_fail(
+            "ConnectionError: name resolution failed"))
+        _songs, denied = self.app._resolve_spotify_songs(self.URL)
+        self.assertFalse(denied)
+
+    def test_failure_never_prints_raw_exception(self):
+        self.app.sp = _FakeSpotify(self._always_fail(
+            "http status: 401, code: -1 - Valid user authentication required"))
+        self.app._resolve_spotify_songs(self.URL)
+        self.app._log.assert_not_called()
+
+    def test_stale_token_is_recovered_not_reported(self):
+        """A refreshable 401 must be healed, never surfaced as access-denied."""
+
+        def behaviour(n):
+            if n == 1:
+                raise Exception("http status: 401, code: -1 - "
+                                "Valid user authentication required")
+            return {"total": 0, "items": []}
+
+        sp = _FakeSpotify(behaviour)
+        self.app.sp = sp
+        songs, denied = self.app._resolve_spotify_songs(self.URL)
+        self.assertFalse(denied, "a recovered 401 must not look like a private playlist")
+        self.assertEqual(len(sp.calls), 2)
+        self.assertEqual(sp.saved, [None])
+        self.app._log.assert_not_called()
+
+    def test_no_client_skips_the_api_entirely(self):
+        self.app.sp = None
+        self.assertEqual(self.app._resolve_spotify_songs(self.URL), ([], False))
+
+    def test_unparseable_url_skips_the_api(self):
+        self.app.sp = _FakeSpotify(self._always_fail("should not be called"))
+        self.assertEqual(
+            self.app._resolve_spotify_songs("https://example.com/not-spotify"),
+            ([], False))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Spotify auth: 401 re-auth + credential-scoped token cache
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _spotipy_client():
+    """A stand-in spotipy client whose token cache records every invalidation."""
+    sp = MagicMock()
+    sp.saved = []
+    sp.auth_manager.cache_handler.save_token_to_cache.side_effect = sp.saved.append
+    return sp
+
+
+class TestSpotifyReauth(unittest.TestCase):
+    def setUp(self):
+        self._wait = spotrr._rl.wait
+        spotrr._rl.wait = lambda: None      # never sleep in tests
+
+    def tearDown(self):
+        spotrr._rl.wait = self._wait
+
+    def _bound(self, sp, body):
+        sp.playlist_items = body.__get__(sp, type(sp))
+        return sp.playlist_items
+
+    def test_401_invalidates_token_and_retries(self):
+        sp = _spotipy_client()
+        calls = []
+
+        def flaky(*_a, **_k):
+            calls.append(1)
+            if len(calls) == 1:
+                raise Exception("http status: 401, code: -1 - "
+                                "https://api.spotify.com/v1/playlists/x/items:\n "
+                                "Valid user authentication required, reason: None")
+            return {"total": 1, "items": []}
+
+        result = spotrr._spotify_call(self._bound(sp, flaky), "x")
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(len(calls), 2, "should retry exactly once")
+        self.assertEqual(sp.saved, [None], "cached token must be discarded")
+
+    def test_persistent_401_gives_up_instead_of_looping(self):
+        sp = _spotipy_client()
+        calls = []
+
+        def always_401(*_a, **_k):
+            calls.append(1)
+            raise Exception("http status: 401, code: -1 - Valid user authentication required")
+
+        with self.assertRaises(Exception):
+            spotrr._spotify_call(self._bound(sp, always_401), "x")
+        self.assertEqual(len(calls), 3)
+
+    def test_403_is_not_retried(self):
+        sp = _spotipy_client()
+        calls = []
+
+        def forbidden(*_a, **_k):
+            calls.append(1)
+            raise Exception("http status: 403, code: -1 - forbidden")
+
+        with self.assertRaises(Exception):
+            spotrr._spotify_call(self._bound(sp, forbidden), "x")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(sp.saved, [])
+
+    def test_401_on_unbound_callable_raises_cleanly(self):
+        def boom(*_a, **_k):
+            raise Exception("http status: 401, code: -1")
+
+        with self.assertRaises(Exception):
+            spotrr._spotify_call(boom)
+
+    def test_successful_call_never_invalidates(self):
+        sp = _spotipy_client()
+        result = spotrr._spotify_call(self._bound(sp, lambda *a, **k: {"total": 0}), "x")
+        self.assertEqual(result, {"total": 0})
+        self.assertEqual(sp.saved, [])
+
+    def test_token_cache_is_scoped_per_client_id(self):
+        base = tempfile.mkdtemp()
+        try:
+            app = _bind("_init_spotify_client", {"_base": base, "_log": MagicMock()})
+            app._spotipy_cache_dir = spotrr.SpotRRApp._spotipy_cache_dir.__get__(
+                app, spotrr.SpotRRApp)
+            creds = [("CID-AAAA", "SECRET-1"), ("CID-BBBB", "SECRET-2")]
+            app._get_creds = lambda: creds.pop(0)
+
+            with patch.object(spotrr, "SPOTIPY_AVAILABLE", True), \
+                 patch.object(spotrr, "spotipy"), \
+                 patch.object(spotrr, "CacheFileHandler",
+                              create=True) as fake_handler, \
+                 patch.object(spotrr, "SpotifyClientCredentials",
+                              create=True) as fake_creds:
+                fake_handler.side_effect = lambda cache_path=None: cache_path
+                fake_creds.side_effect = \
+                    lambda **kw: MagicMock(cache_handler=kw.get("cache_handler"))
+
+                app._init_spotify_client()
+                first = fake_creds.call_args.kwargs["cache_handler"]
+                app._init_spotify_client()
+                second = fake_creds.call_args.kwargs["cache_handler"]
+
+            self.assertNotEqual(first, second,
+                                "different client_id must not share a token file")
+            for path in (first, second):
+                self.assertTrue(path.startswith(os.path.join(base, ".spotipy")))
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_clearing_tokens_empties_the_cache_dir(self):
+        base = tempfile.mkdtemp()
+        try:
+            app = _bind("_clear_spotipy_tokens", {"_base": base})
+            app._spotipy_cache_dir = spotrr.SpotRRApp._spotipy_cache_dir.__get__(
+                app, spotrr.SpotRRApp)
+            os.makedirs(app._spotipy_cache_dir(), exist_ok=True)
+            for name in ("aaa", "bbb"):
+                with open(os.path.join(app._spotipy_cache_dir(), name), "w") as f:
+                    f.write("{}")
+            app._clear_spotipy_tokens()
+            self.assertEqual(os.listdir(app._spotipy_cache_dir()), [])
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_clearing_tokens_on_missing_dir_is_safe(self):
+        base = os.path.join(tempfile.mkdtemp(), "does-not-exist")
+        app = _bind("_clear_spotipy_tokens", {"_base": base})
+        app._spotipy_cache_dir = spotrr.SpotRRApp._spotipy_cache_dir.__get__(
+            app, spotrr.SpotRRApp)
+        app._clear_spotipy_tokens()          # must not raise
 
 
 # ─────────────────────────────────────────────────────────────────────────────
