@@ -2515,17 +2515,19 @@ class SpotRRApp:
             # fetches via our own spotipy client.  Falls back to client.search()
             # if anything goes wrong (e.g. no credentials, rate-limit, etc.).
             kind = self._url_type(url)
+            access_denied = False
             if platform == "soundcloud":
                 songs = self._resolve_soundcloud_songs(url)
             elif platform == "spotify" and kind in ("playlist", "album") and self.sp:
                 songs, access_denied = self._resolve_spotify_songs(url)
                 if not songs:
-                    if access_denied:
-                        what = "album" if kind == "album" else "playlist"
-                        self._log(
-                            f"⚠️  Spotify wouldn't share this {what} — it may be private or collaborative.\n"
-                            f"     Looking it up by search instead, which can be slower.",
-                            "warning")
+                    # Private or collaborative playlists are invisible to the API,
+                    # so look them up by search instead.  Deliberately silent:
+                    # if this works the user gets their music and the mechanism is
+                    # irrelevant, and an unprompted "it may be private" warning
+                    # only worries people whose download is about to succeed.  The
+                    # reason is reported at the failure point instead, where it
+                    # is something the user can actually act on.
                     songs = client.search([url])
             else:
                 songs = client.search([url])
@@ -2534,7 +2536,15 @@ class SpotRRApp:
             self._set_progress(0)
 
             if not songs:
-                self._log("❌  No songs found for this URL", "error")
+                if access_denied:
+                    what = "album" if kind == "album" else "playlist"
+                    self._log(
+                        f"❌  This {what} is private or collaborative, so Spotify "
+                        f"won't share it — and search couldn't find it either.\n"
+                        f"     Make it public, or share it with the Spotify account "
+                        f"this app is signed in with.", "error")
+                else:
+                    self._log("❌  No songs found for this URL", "error")
                 return False
 
             self._log(

@@ -970,16 +970,34 @@ class TestWarningPolicy(unittest.TestCase):
         self.assertEqual(offenders, [],
                          f"traceback printed to the console: {offenders}")
 
-    def test_private_playlist_hint_is_visible(self):
-        self.assertTrue(spotrr._is_visible_warning(
-            "⚠️  Spotify wouldn't share this playlist — it may be private or "
-            "collaborative.\n     Looking it up by search instead."))
+    def test_successful_fallback_says_nothing_about_permissions(self):
+        """A search fallback that works must be silent.
+
+        The warning used to fire before the fallback ran, so a download that
+        was about to succeed was still preceded by a scary line the user could
+        do nothing about.  Silence is correct here; the reason belongs on the
+        failure path.
+        """
+        src = inspect.getsource(spotrr.SpotRRApp._run_spotdl)
+        res = src[src.index("_resolve_spotify_songs(url)"):]
+        res = res[:res.index("Found {self._dl_total}")]
+        self.assertNotIn("⚠️", res, "a resolved-by-search playlist still warns")
+
+    def test_no_premature_private_playlist_warning_anywhere(self):
+        import re
+        source = inspect.getsource(spotrr)
+        for phrase in ("wouldn't share this", "Looking it up by search",
+                       "which can be slower"):
+            self.assertNotIn(phrase, source,
+                             f"obsolete pre-emptive warning {phrase!r} still present")
 
     def test_no_user_visible_message_leaks_internals(self):
         """Nothing shown to the user may mention implementation jargon."""
         shown = [
-            "⚠️  Spotify wouldn't share this playlist — it may be private or collaborative.\n"
-            "     Looking it up by search instead, which can be slower.",
+            "❌  This playlist is private or collaborative, so Spotify won't share it — "
+            "and search couldn't find it either.\n"
+            "     Make it public, or share it with the Spotify account this app is "
+            "signed in with.",
             "⚠️  No API credentials — use 🔑 Client ID / Secret buttons",
             "⚠️  Please paste a URL (Spotify, YouTube or SoundCloud)",
             "❌  The download could not be completed",
@@ -1751,6 +1769,43 @@ class TestRunSpotdlWiring(unittest.TestCase):
         # Otherwise a reused pre-warm client could carry a stale value from
         # spotdl's on-disk config.
         self.assertIn('"ffmpeg_args":     None', inspect.getsource(spotrr))
+
+
+class TestPrivatePlaylistFallback(unittest.TestCase):
+    """Private/collaborative playlists: silent when it works, explained when not."""
+
+    def _start_dl_source(self):
+        src = inspect.getsource(spotrr.SpotRRApp._run_spotdl)
+        return src[src.index("kind = self._url_type(url)"):
+                   src.index("Found {self._dl_total}")]
+
+    def test_fallback_to_search_is_still_there(self):
+        # Removing the warning must not remove the recovery path.
+        self.assertIn("songs = client.search([url])", self._start_dl_source())
+
+    def test_access_denied_is_remembered_for_the_failure_path(self):
+        src = self._start_dl_source()
+        self.assertIn("access_denied = False", src)
+        self.assertIn("songs, access_denied = self._resolve_spotify_songs(url)", src)
+
+    def test_failure_explains_the_real_cause(self):
+        src = self._start_dl_source()
+        self.assertIn("if access_denied:", src)
+        self.assertIn("private or collaborative", src)
+        self.assertIn("search couldn't find it either", src)
+
+    def test_failure_message_is_actionable(self):
+        src = self._start_dl_source()
+        self.assertIn("Make it public", src)
+
+    def test_failure_message_suggests_no_slowdown_as_the_cause(self):
+        # The old text blamed search speed, which is wrong — search is fine,
+        # the playlist is simply not visible.
+        self.assertNotIn("slower", src := self._start_dl_source())
+
+    def test_generic_error_still_covers_the_non_denied_case(self):
+        src = self._start_dl_source()
+        self.assertIn("No songs found for this URL", src)
 
 
 class TestSettingsCoercion(unittest.TestCase):
