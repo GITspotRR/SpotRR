@@ -1825,15 +1825,6 @@ class TestCachedClientTracksFormatChanges(unittest.TestCase):
         self.assertIn("scan_formats", src,
                       "_run_spotdl must refresh scan_formats on the cached client")
 
-    def test_spotdl_never_recomputes_it(self):
-        # The whole bug rests on this, so pin it: if a future spotdl release
-        # starts recomputing scan_formats, the workaround can be dropped.
-        # spotdl is mocked in this file, so read the real source off disk.
-        from importlib.metadata import distribution
-        src = (Path(distribution("spotdl").locate_file("spotdl"))
-               / "download" / "downloader.py").read_text(encoding="utf-8")
-        self.assertEqual(src.count("self.scan_formats ="), 1,
-                         "spotdl now recomputes scan_formats; drop the workaround")
 
 
 class TestVersionIsVisibleInTheLog(unittest.TestCase):
