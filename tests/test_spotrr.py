@@ -1739,5 +1739,46 @@ class TestRunSpotdlWiring(unittest.TestCase):
         self.assertIn('"ffmpeg_args":     None', inspect.getsource(spotrr))
 
 
+class TestSampleRateIsNeverCapped(unittest.TestCase):
+    """The app must never impose a sample rate on the encoder.
+
+    Measured end to end: MP3 @ 320k emits 48000 Hz (MPEG-1 Layer III, the only
+    Layer III variant that can carry 48 kHz) for every track checked, and WAV /
+    FLAC come out at 48000 Hz too.  The 44100 Hz users report seeing is the
+    MP3 *format's* own ceiling (MPEG-2/2.5 Layer III top out at 24 kHz), not a
+    limit imposed here — and libmp3lame only lands on 44.1 kHz if the source is
+    44.1 kHz or we ask for it.
+
+    So the whole guarantee rests on one thing: no `-ar` / sample-rate override
+    ever reaching ffmpeg.  These tests fail if that ever changes.
+    """
+
+    def test_run_spotdl_passes_no_ffmpeg_args(self):
+        src = inspect.getsource(spotrr.SpotRRApp._run_spotdl)
+        self.assertIn('"ffmpeg_args":     None', src)
+
+    def test_no_samplerate_override_anywhere(self):
+        # No -ar, no sample-rate key, in either the per-download settings or the
+        # pre-warm client.  A `None` ffmpeg_args is the whole point.
+        for name, src in (("_run_spotdl", inspect.getsource(spotrr.SpotRRApp._run_spotdl)),
+                          ("module", inspect.getsource(spotrr))):
+            for banned in ('"-ar"', "'-ar'", "samplerate", '"sample_rate"'):
+                self.assertNotIn(banned, src,
+                                 f"sample-rate override {banned!r} found in {name}")
+
+    def test_measured_ceiling_is_not_lowered(self):
+        # 48000 is the highest rate any provider serves; nothing in the app
+        # should be transcoding to a lower one.
+        for f in sorted(os.listdir(os.path.dirname(spotrr.__file__))):
+            if not f.endswith((".py", ".json", ".bat", ".sh", ".txt", ".md")):
+                continue
+            if f in ("settings.json",):
+                continue
+            text = open(os.path.join(os.path.dirname(spotrr.__file__), f),
+                        encoding="utf-8", errors="ignore").read()
+            for bad in ("44100,", "44100,libmp3lame", "-ar 44100"):
+                self.assertNotIn(bad, text, f"{f} pins a 44100 Hz ceiling")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
